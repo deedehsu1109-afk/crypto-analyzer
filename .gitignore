@@ -1,0 +1,23 @@
+# 資料庫與使用者設定（含 API Key，不上傳）
+crypto_analyzer/crypto_data.db
+crypto_analyzer/config.json
+
+# Python 快取
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# 虛擬環境
+venv/
+.venv/
+env/
+
+# 系統與編輯器
+.DS_Store
+Thumbs.db
+*.log
+.idea/
+.vscode/
+*.swp
