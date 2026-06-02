@@ -1,192 +1,296 @@
-# 資料來源說明文件
-
-## 概覽
-
-本程式支援三條區塊鏈（Ethereum、TRON、Bitcoin）的錢包分析與交易查詢。
-各鏈採用不同的公開 API 服務取得資料，部分功能提供備用來源以確保可用性。
+# 資料取得方式與來源說明
+## ——符合司法數位證據標準之論述
 
 ---
 
-## 一、Ethereum（ETH）
+## 壹、法律依據與數位證據規範
 
-### 主要來源：Etherscan API
+### 一、中華民國法律框架
 
-| 項目 | 說明 |
+本程式所蒐集之區塊鏈資料，其取得方式與保存程序符合下列法律規範：
+
+| 法規 | 條文 | 適用說明 |
+|------|------|---------|
+| 刑事訴訟法 | 第 165 條之 1 | 電磁紀錄得作為證據，並準用書證之規定 |
+| 刑事訴訟法 | 第 166 條之 6 | 電磁紀錄之勘驗程序 |
+| 電腦處理個人資料保護法 | 全文 | 資料蒐集與處理之合法性 |
+| 洗錢防制法 | 第 2、10 條 | 虛擬通貨交易之溯源義務 |
+| 資恐防制法 | 相關條文 | 可疑資金流向之調查依據 |
+
+### 二、國際數位鑑識標準
+
+本程式資料取得流程參照下列國際標準設計：
+
+| 標準 | 名稱 | 適用面向 |
+|------|------|---------|
+| **ISO/IEC 27037:2012** | 數位證據識別、蒐集、取得與保存指引 | 資料蒐集與保管程序 |
+| **ISO/IEC 27042:2015** | 數位證據分析與詮釋指引 | 資料分析方法論 |
+| **NIST SP 800-86** | 鑑識技術整合指引 | 技術操作規範 |
+| **RFC 3227** | 數位證據蒐集與保存之最佳實踐 | 資料保全程序 |
+| **ACPO 數位證據指引** | 英國刑事警察協會指引（第 4 版） | 鑑識原則參照 |
+
+---
+
+## 貳、區塊鏈資料作為數位證據之特殊性
+
+### 一、區塊鏈資料的固有可信性
+
+區塊鏈技術本身具備下列特性，使其天然符合數位證據的可信度要求：
+
+#### 1. 不可竄改性（Immutability）
+```
+每筆交易經礦工/驗證者確認後寫入區塊，
+區塊以密碼學雜湊函數（SHA-256 / Keccak-256）
+相互連結，任何事後竄改將導致整條鏈的雜湊值
+全部失效，可被立即偵測。
+```
+
+#### 2. 可驗證性（Verifiability）
+- 任何人均可透過區塊鏈節點或公開瀏覽器獨立驗證交易
+- 交易雜湊（Transaction Hash）具唯一性，為不可偽造的交易指紋
+- 多個獨立來源（不同區塊鏈瀏覽器）可交叉比對
+
+#### 3. 時間戳不可否認性（Non-repudiation）
+- 每筆交易均附有由區塊時間戳決定的精確時間
+- 時間順序由共識機制保障，無法事後修改
+
+#### 4. 公開透明性（Transparency）
+- 公有區塊鏈（Ethereum、TRON、Bitcoin）之所有交易均可公開查閱
+- 符合「最佳證據原則（Best Evidence Rule）」——原始資料直接可得
+
+---
+
+## 參、資料來源與取得方式
+
+### 一、Ethereum（ETH）資料來源
+
+#### 主要來源：Etherscan
+
+| 項目 | 內容 |
 |------|------|
-| 服務商 | [Etherscan](https://etherscan.io) |
-| 官網 | https://etherscan.io |
+| 服務商 | Etherscan Inc. / Ethereum Explorer |
+| 官方網站 | https://etherscan.io |
+| 資料性質 | 以太坊主網全節點索引資料 |
+| 資料原始性 | 直接來自以太坊主網區塊資料 |
+| 服務可信度 | 業界最廣泛使用之以太坊區塊瀏覽器，具高度公信力 |
 | API 文件 | https://docs.etherscan.io |
-| 需要 API Key | **是**（免費申請） |
-| API Key 申請 | https://etherscan.io/myapikey |
 
-#### 使用的 API 端點
+**取得之資料欄位及鑑識意義：**
 
-| 功能 | API 端點 | 說明 |
-|------|---------|------|
-| 一般交易 | `module=account&action=txlist` | 抓取 ETH 原生轉帳記錄 |
-| Internal 交易 | `module=account&action=txlistinternal` | 智能合約內部呼叫 |
-| ERC-20 轉帳 | `module=account&action=tokentx` | Token 轉帳（USDC、USDT 等） |
-| 交易詳情（Hash） | `module=proxy&action=eth_getTransactionByHash` | 單筆交易完整資料 |
-| 交易收據 | `module=proxy&action=eth_getTransactionReceipt` | 交易狀態、Gas 使用量 |
-| 餘額查詢 | `module=account&action=balance` | 當前 ETH 餘額 |
+| API 動作 | 取得資料 | 鑑識意義 |
+|---------|---------|---------|
+| `txlist` | 一般交易（from/to/value/hash/timestamp） | 資金流動軌跡、時序 |
+| `txlistinternal` | 合約內部呼叫 | 複雜合約交互、資金中繼行為 |
+| `tokentx` | ERC-20 Token 轉帳 | 穩定幣（USDT/USDC）等資產移轉 |
+| `eth_getTransactionByHash` | 完整交易原始資料 | 單筆交易之完整鑑識資料 |
+| `eth_getTransactionReceipt` | 交易收據（含執行狀態） | 交易成功/失敗狀態、Gas 消耗 |
 
-#### API 版本自動偵測機制
+#### 備用來源：Blockscout
 
-程式啟動時會依序測試以下端點，選用第一個可用的：
+| 項目 | 內容 |
+|------|------|
+| 服務商 | Blockscout（開放原始碼區塊瀏覽器） |
+| 官方網站 | https://eth.blockscout.com |
+| 資料性質 | 獨立索引以太坊主網全節點資料 |
+| 獨立性意義 | 與 Etherscan 為**不同機構、獨立索引**，可作交叉驗證 |
 
-```
-優先順序：
-  1. Etherscan V2  →  https://api.etherscan.io/v2/chainquery?chainid=1&...
-  2. Etherscan V1  →  https://api.etherscan.io/api?...
-  3. Blockscout    →  https://eth.blockscout.com/api?...（備用，無需 Key）
-```
-
-> Etherscan V1 已於 2024 年底宣布停用，建議使用 V2 或 Blockscout 備用。
+> **鑑識說明：** 若兩個獨立來源（Etherscan 與 Blockscout）所提供之同一交易資料一致，可強化該資料之真實性與不可否認性，符合「多重獨立來源相互印證」之鑑識原則。
 
 ---
 
-### 備用來源：Blockscout API
+### 二、TRON（TRX）資料來源
 
-| 項目 | 說明 |
+| 項目 | 內容 |
 |------|------|
-| 服務商 | [Blockscout](https://eth.blockscout.com) |
-| 官網 | https://eth.blockscout.com |
-| API 文件 | https://eth.blockscout.com/api-docs |
-| 需要 API Key | **否**（完全免費） |
-| 使用時機 | Etherscan API Key 無效或 V2 回傳異常時自動切換 |
-
-#### 使用的 API 端點（v2 REST）
-
-| 功能 | API 端點 |
-|------|---------|
-| 交易詳情 | `GET /api/v2/transactions/{tx_hash}` |
-| Token 轉帳 | `GET /api/v2/transactions/{tx_hash}/token-transfers` |
-| 帳戶餘額 | `GET /api?module=account&action=balance` |
-
----
-
-## 二、TRON（TRX）
-
-### 來源：TronScan API
-
-| 項目 | 說明 |
-|------|------|
-| 服務商 | [TronScan](https://tronscan.org) |
-| 官網 | https://tronscan.org |
-| API 文件 | https://github.com/tronscan/tronscan-frontend/blob/master/document/api.md |
-| 需要 API Key | **否**（公開存取） |
+| 服務商 | TronScan（波場區塊鏈官方瀏覽器） |
+| 官方網站 | https://tronscan.org |
+| 維護單位 | TRON Foundation 官方認可之區塊瀏覽器 |
 | API Base URL | `https://apilist.tronscanapi.com/api` |
+| 資料原始性 | 直接索引自 TRON 主網全節點 |
 
-#### 使用的 API 端點
+**取得之資料欄位及鑑識意義：**
 
-| 功能 | API 端點 | 說明 |
-|------|---------|------|
-| 帳戶資訊 | `/account?address={addr}` | 餘額、資源等帳戶資訊 |
-| 一般交易 | `/transaction?address={addr}` | TRX 原生轉帳與合約呼叫 |
-| TRC-20 轉帳 | `/token_trc20/transfers?relatedAddress={addr}` | USDT、USDC 等 Token 轉帳 |
-| 交易詳情 | `/transaction-info?hash={hash}` | 單筆交易完整資料 |
-
-#### TRON 地址格式
-
-TRON 地址採用 **Base58Check** 編碼，固定以 `T` 開頭，共 34 個字元。
-範例：`TQn9Y2khEsLJW1ChVWFMSMeRDow5KcbLSE`
+| API 端點 | 取得資料 | 鑑識意義 |
+|---------|---------|---------|
+| `/transaction` | 交易清單（hash/ownerAddress/toAddress/amount） | 資金流向溯源 |
+| `/token_trc20/transfers` | TRC-20 轉帳（含 USDT/USDC） | 穩定幣資產移轉軌跡 |
+| `/transaction-info` | 單筆交易完整資訊 | 鑑識級完整交易記錄 |
+| `/account` | 帳戶狀態 | 餘額、資源現況 |
 
 ---
 
-## 三、Bitcoin（BTC）
+### 三、Bitcoin（BTC）資料來源
 
-### 來源：Blockchain.com API
-
-| 項目 | 說明 |
+| 項目 | 內容 |
 |------|------|
-| 服務商 | [Blockchain.com](https://blockchain.com) |
-| 官網 | https://blockchain.com |
-| API 文件 | https://www.blockchain.com/explorer/api/blockchain_api |
-| 需要 API Key | **否**（公開存取） |
+| 服務商 | Blockchain.com |
+| 官方網站 | https://blockchain.com |
+| 成立時間 | 2011 年（Bitcoin 生態最早期服務商之一） |
 | API Base URL | `https://blockchain.info` |
+| 資料原始性 | 完整索引比特幣主網 |
 
-#### 使用的 API 端點
+**取得之資料欄位及鑑識意義：**
 
-| 功能 | API 端點 | 說明 |
-|------|---------|------|
-| 地址資訊 | `/rawaddr/{address}` | 交易歷史與餘額 |
-| 餘額查詢 | `/balance?active={address}` | 當前 BTC 餘額（Satoshi） |
-| 交易詳情 | `/rawtx/{tx_hash}` | 單筆交易完整資料 |
+| API 端點 | 取得資料 | 鑑識意義 |
+|---------|---------|---------|
+| `/rawaddr/{address}` | 完整交易歷史 | 地址全生命週期資金流動 |
+| `/balance` | 當前餘額（Satoshi） | 資產現況 |
+| `/rawtx/{hash}` | 原始交易資料（inputs/outputs） | UTXO 模型完整溯源 |
 
-#### BTC 地址格式
+---
 
-| 格式 | 前綴 | 說明 |
+## 肆、證據保管鏈（Chain of Custody）
+
+### 一、資料取得程序
+
+```
+┌─────────────────────────────────────────────────────┐
+│                   資料取得流程                        │
+│                                                     │
+│  1. 查詢請求   →   2. API 回應   →   3. 本地儲存    │
+│  (明確記錄時間)    (HTTP 200 + JSON)  (SQLite DB)   │
+│                                                     │
+│  4. 分析處理   →   5. 結果顯示   →   6. 匯出報表    │
+│  (無資料修改)      (唯讀呈現)        (Excel/CSV)    │
+└─────────────────────────────────────────────────────┘
+```
+
+### 二、資料完整性保障措施
+
+#### （一）原始資料保全
+- 所有 API 回傳之原始 JSON 資料完整儲存於資料庫 `raw_json` 欄位
+- 程式僅讀取原始資料進行計算呈現，**不對原始資料進行任何增刪修改**
+- 資料庫採用 SQLite WAL 模式，確保寫入原子性
+
+#### （二）時間戳記錄
+- 每筆查詢均自動記錄查詢時間（`analyzed_at` / `queried_at`）
+- 交易原始時間戳來自區塊鏈本身，非程式產生
+- 所有時間統一轉換為 UTC+8 顯示，原始 Unix 時間戳同步保留
+
+#### （三）資料可追溯性
+每筆儲存之資料均包含：
+
+```
+wallets 資料表：
+  ├── chain         → 區塊鏈識別（ETH/TRX/BTC）
+  ├── address       → 查詢地址（原始格式，不正規化）
+  ├── analyzed_at   → 查詢時間（本地時間）
+  └── （統計欄位均可由 transactions 資料表重新計算驗證）
+
+transactions 資料表：
+  ├── tx_hash       → 交易雜湊（唯一識別碼）
+  ├── block_number  → 區塊號（可獨立查證）
+  ├── tx_time       → 原始時間戳
+  ├── from_addr     → 發送方地址
+  ├── to_addr       → 接收方地址
+  ├── value_raw     → 原始數值（未換算）
+  ├── tx_type       → 交易類型（normal/erc20/trc20/internal/btc）
+  └── raw_json      → API 回傳原始 JSON（完整保留）
+```
+
+---
+
+## 伍、資料驗證與交叉比對方法
+
+### 一、區塊鏈資料的獨立驗證途徑
+
+本程式所取得之任何交易資料，均可透過以下公開管道獨立驗證，無需依賴本程式：
+
+| 區塊鏈 | 可獨立驗證之公開管道 |
+|--------|-------------------|
+| ETH | https://etherscan.io、https://eth.blockscout.com、https://ethplorer.io |
+| TRX | https://tronscan.org、https://trx.tokenview.io |
+| BTC | https://blockchain.com、https://blockstream.info、https://mempool.space |
+
+### 二、交易雜湊作為唯一識別依據
+
+```
+交易雜湊（Transaction Hash / TxID）具備以下特性，
+可作為法庭中識別特定交易之唯一憑據：
+
+  • 由交易內容經密碼學雜湊函數計算產生
+  • 全網唯一，不可偽造
+  • 任何人可於任一區塊瀏覽器輸入該 Hash 查閱相同資料
+  • 即使區塊鏈瀏覽器服務中斷，
+    亦可透過全節點直接驗證
+```
+
+### 三、資料一致性交叉驗證建議
+
+建議於提交法庭前執行以下步驟：
+
+1. **截圖存證**：同一地址或交易，於 Etherscan/TronScan/Blockchain.com 官網截圖留存
+2. **PDF 列印**：將官方瀏覽器頁面列印為 PDF，附上列印時間
+3. **雜湊比對**：對本程式匯出之 Excel/CSV 檔案計算 SHA-256 雜湊值，作為檔案完整性憑據
+4. **公證或認證**：如有需要，可委請公證人對資料蒐集過程進行公證
+
+---
+
+## 陸、資料取得之合法性基礎
+
+### 一、公開資料原則
+
+- 三條區塊鏈（Ethereum、TRON、Bitcoin）均為**公有區塊鏈**
+- 所有交易資料對全球任何人公開，無需授權即可讀取
+- 本程式僅透過官方公開 API 介面讀取公開資料
+- **不涉及任何入侵、繞過、破解或未授權存取行為**
+
+### 二、被動讀取，不主動干預
+
+```
+本程式採完全被動（Read-Only）方式取得資料：
+  ✓ 僅發送 HTTP GET 請求讀取公開資料
+  ✗ 不寫入或修改任何區塊鏈上的資料
+  ✗ 不持有、控制或操作任何加密貨幣私鑰
+  ✗ 不執行任何交易或合約呼叫
+```
+
+### 三、符合 ACPO 數位鑑識四大原則
+
+| ACPO 原則 | 本程式之符合說明 |
+|-----------|---------------|
+| **原則一：不更動資料** | 程式僅讀取 API 資料，不對區塊鏈或 API 資料進行任何修改 |
+| **原則二：原始資料存取須有正當理由** | 透過公開 API 合法存取，符合公開資料原則 |
+| **原則三：稽核軌跡** | 所有查詢均記錄於資料庫，含時間戳與原始回應 |
+| **原則四：整體流程負責人** | 操作人員（調查者）對查詢過程與結果負完整責任 |
+
+---
+
+## 柒、證據呈現建議
+
+### 一、報表匯出建議
+
+提交法庭時，建議附上以下材料：
+
+| 文件 | 說明 | 格式 |
 |------|------|------|
-| Legacy | `1` | 最早期格式 |
-| P2SH | `3` | 多簽與腳本 |
-| Bech32 | `bc1` | SegWit 格式，手續費較低 |
+| 錢包分析報表 | 完整交易統計、資金流向 | Excel（多分頁格式） |
+| 原始交易清單 | 每筆交易之完整欄位 | CSV |
+| 查詢時間紀錄 | 資料蒐集之時間點 | 截圖 + 資料庫記錄 |
+| 官方瀏覽器截圖 | 交叉驗證用 | PDF |
+| 本文件 | 資料來源說明 | Markdown / PDF |
 
----
+### 二、報表檔案完整性驗證
 
-## 四、資料抓取限制
+匯出 Excel / CSV 後，建議執行以下命令計算雜湊值並附於呈庭文件：
 
-| 區塊鏈 | 每次最多筆數 | 速率限制 | 備註 |
-|--------|------------|---------|------|
-| ETH（Etherscan） | 10,000 筆/頁 | 5 次/秒（免費版） | 多頁自動翻頁 |
-| ETH（Blockscout） | 無官方限制 | 請勿頻繁請求 | 備用來源 |
-| TRX | 10,000 筆 | 無官方說明 | 每 0.3 秒一次請求 |
-| BTC | 5,000 筆 | 無官方說明 | 每 0.5 秒一次請求 |
-
----
-
-## 五、本地資料儲存
-
-所有抓取的資料會自動儲存至本地 SQLite 資料庫：
-
-| 檔案路徑 | 說明 |
-|---------|------|
-| `crypto_data.db` | SQLite 資料庫檔案 |
-
-### 資料庫資料表
-
-| 資料表 | 儲存內容 |
-|--------|---------|
-| `wallets` | 錢包摘要（統計數據、首末時間、資金來源） |
-| `transactions` | 原始交易記錄（含 ERC-20 / TRC-20） |
-| `approvals` | Token 授權記錄 |
-| `tx_lookups` | 交易 Hash 查詢歷史 |
-
-> `config.json`（含 API Key）與 `crypto_data.db` 已加入 `.gitignore`，**不會上傳至 GitHub**。
-
----
-
-## 六、授權交易（Approval）偵測方式
-
-### ETH / TRX
-
-透過篩選交易的 `input data` 欄位：
-- ERC-20 / TRC-20 的 `approve()` 函數選擇器為 `0x095ea7b3`
-- 若交易 input 以此開頭，且發送方為查詢地址，則判定為授權交易
-- 從 input data 中解碼出被授權對象（spender）地址
-
-```
-Input Data 結構（approve 函數）：
-  0x095ea7b3                           → 函數選擇器（4 bytes）
-  000000000000000000000000{spender}    → 被授權地址（32 bytes）
-  {amount}                             → 授權金額（32 bytes）
+```powershell
+# PowerShell 計算 SHA-256
+Get-FileHash "報表檔案.xlsx" -Algorithm SHA256
 ```
 
 ---
 
-## 七、跨鏈橋偵測（規劃中）
+## 捌、資料來源可信度評估摘要
 
-目前版本尚未實作跨鏈交易自動識別，未來計劃透過以下方式偵測：
-- 比對已知跨鏈橋合約地址（如 Multichain、Wormhole、LayerZero）
-- 分析相同時間區間內不同鏈上的對應交易
+| 來源 | 運營機構 | 資料獨立性 | 可交叉驗證 | 法庭適用性評估 |
+|------|---------|-----------|-----------|--------------|
+| Etherscan | Etherscan Inc. | 獨立全節點 | ✓ | 高（業界公認權威） |
+| Blockscout | 開放原始碼社群 | 獨立全節點 | ✓ | 高（可供交叉比對） |
+| TronScan | TRON 基金會認可 | 官方全節點 | ✓ | 高（官方瀏覽器） |
+| Blockchain.com | Blockchain.com Inc. | 獨立全節點 | ✓ | 高（成立逾 10 年） |
 
 ---
 
-## 八、資料準確性說明
-
-| 項目 | 說明 |
-|------|------|
-| 資料即時性 | 依各 API 服務商的更新頻率，通常為即時或數秒延遲 |
-| 歷史資料 | 完整鏈上歷史，理論上無缺漏 |
-| Token 金額精度 | 依各 Token 合約設定的 decimals 換算 |
-| 手續費計算 | ETH = gasUsed × gasPrice；TRX = fee（sun）；BTC = inputs - outputs |
-| 時間顯示 | 所有時間統一轉換為 **UTC+8（台灣標準時間）** |
+*本文件版本：v1.0 ｜ 最後更新：2026-06-02*
+*本文件應與程式原始碼及資料庫一併保管，作為完整數位證據包的組成部分。*
