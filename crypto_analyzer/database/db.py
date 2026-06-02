@@ -16,13 +16,30 @@ def _conn() -> sqlite3.Connection:
 
 
 def init_db():
-    """建立所有資料表（若不存在）"""
+    """建立所有資料表（若不存在），並執行欄位遷移"""
     with _conn() as con:
         con.executescript("""
+        -- ── 案件主表 ──────────────────────────────────────────────────────────
+        CREATE TABLE IF NOT EXISTS cases (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_number   TEXT    NOT NULL UNIQUE,
+            case_name     TEXT    NOT NULL,
+            case_type     TEXT    DEFAULT '一般',
+            status        TEXT    DEFAULT '進行中',
+            investigator  TEXT,
+            created_at    TEXT    DEFAULT (datetime('now','localtime')),
+            updated_at    TEXT    DEFAULT (datetime('now','localtime')),
+            description   TEXT,
+            notes         TEXT
+        );
+
+        -- ── 錢包摘要 ──────────────────────────────────────────────────────────
         CREATE TABLE IF NOT EXISTS wallets (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id       INTEGER REFERENCES cases(id) ON DELETE SET NULL,
             chain         TEXT    NOT NULL,
             address       TEXT    NOT NULL,
+            label         TEXT,
             analyzed_at   TEXT    DEFAULT (datetime('now','localtime')),
             first_tx_time TEXT,
             last_tx_time  TEXT,
@@ -41,6 +58,7 @@ def init_db():
             UNIQUE(chain, address)
         );
 
+        -- ── 交易明細 ──────────────────────────────────────────────────────────
         CREATE TABLE IF NOT EXISTS transactions (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
             wallet_id    INTEGER REFERENCES wallets(id) ON DELETE CASCADE,
@@ -65,6 +83,7 @@ def init_db():
             raw_json     TEXT
         );
 
+        -- ── 授權記錄 ──────────────────────────────────────────────────────────
         CREATE TABLE IF NOT EXISTS approvals (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
             wallet_id  INTEGER REFERENCES wallets(id) ON DELETE CASCADE,
@@ -77,8 +96,10 @@ def init_db():
             time       TEXT
         );
 
+        -- ── Hash 查詢歷史 ─────────────────────────────────────────────────────
         CREATE TABLE IF NOT EXISTS tx_lookups (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id     INTEGER REFERENCES cases(id) ON DELETE SET NULL,
             chain       TEXT NOT NULL,
             tx_hash     TEXT NOT NULL,
             queried_at  TEXT DEFAULT (datetime('now','localtime')),
@@ -93,12 +114,29 @@ def init_db():
             UNIQUE(chain, tx_hash)
         );
 
-        CREATE INDEX IF NOT EXISTS idx_txs_wallet   ON transactions(wallet_id);
-        CREATE INDEX IF NOT EXISTS idx_txs_hash     ON transactions(tx_hash);
-        CREATE INDEX IF NOT EXISTS idx_txs_addr     ON transactions(address);
+        -- ── 索引 ──────────────────────────────────────────────────────────────
+        CREATE INDEX IF NOT EXISTS idx_txs_wallet    ON transactions(wallet_id);
+        CREATE INDEX IF NOT EXISTS idx_txs_hash      ON transactions(tx_hash);
+        CREATE INDEX IF NOT EXISTS idx_txs_addr      ON transactions(address);
         CREATE INDEX IF NOT EXISTS idx_approvals_wid ON approvals(wallet_id);
-        CREATE INDEX IF NOT EXISTS idx_lookup_hash  ON tx_lookups(tx_hash);
+        CREATE INDEX IF NOT EXISTS idx_lookup_hash   ON tx_lookups(tx_hash);
         """)
+        # 遷移：對舊資料庫補欄位（若尚未存在）
+        _migrate(con)
+
+
+def _migrate(con: sqlite3.Connection):
+    existing_w = {r[1] for r in con.execute("PRAGMA table_info(wallets)").fetchall()}
+    if "case_id" not in existing_w:
+        con.execute("ALTER TABLE wallets ADD COLUMN case_id INTEGER REFERENCES cases(id) ON DELETE SET NULL")
+    if "label" not in existing_w:
+        con.execute("ALTER TABLE wallets ADD COLUMN label TEXT")
+    existing_l = {r[1] for r in con.execute("PRAGMA table_info(tx_lookups)").fetchall()}
+    if "case_id" not in existing_l:
+        con.execute("ALTER TABLE tx_lookups ADD COLUMN case_id INTEGER REFERENCES cases(id) ON DELETE SET NULL")
+    # case_id 欄位存在後才能建索引
+    con.execute("CREATE INDEX IF NOT EXISTS idx_wallets_case ON wallets(case_id)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_lookups_case ON tx_lookups(case_id)")
 
 
 # ── 儲存錢包分析結果 ──────────────────────────────────────────────────────────
@@ -288,7 +326,7 @@ def _save_approvals(wallet_id: int, profile: dict):
 
 # ── 儲存 Hash 查詢結果 ────────────────────────────────────────────────────────
 
-def save_tx_lookup(result: dict):
+def save_tx_lookup(result: dict, case_id: int = None):
     chain   = result.get("chain", "")
     tx_hash = result.get("hash", "")
     if not tx_hash:
@@ -296,10 +334,11 @@ def save_tx_lookup(result: dict):
     with _conn() as con:
         con.execute("""
             INSERT INTO tx_lookups
-                (chain,tx_hash,status,from_addr,to_addr,
+                (chain,tx_hash,case_id,status,from_addr,to_addr,
                  value_str,fee_str,block,tx_time,raw_json,queried_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now','localtime'))
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,datetime('now','localtime'))
             ON CONFLICT(chain,tx_hash) DO UPDATE SET
+                case_id   = COALESCE(excluded.case_id, case_id),
                 status    = excluded.status,
                 from_addr = excluded.from_addr,
                 to_addr   = excluded.to_addr,
@@ -310,7 +349,7 @@ def save_tx_lookup(result: dict):
                 raw_json  = excluded.raw_json,
                 queried_at= excluded.queried_at
         """, (
-            chain, tx_hash, result.get("狀態",""),
+            chain, tx_hash, case_id, result.get("狀態",""),
             result.get("發送方",""), result.get("接收方",""),
             result.get("ETH 金額", result.get("TRX 金額", result.get("輸出總額",""))),
             result.get("手續費",""), result.get("區塊",""),
@@ -380,3 +419,115 @@ def search_address(keyword: str) -> list[dict]:
         ).fetchall()
     return {"wallets": [dict(r) for r in wallets],
             "related_txs": [dict(r) for r in txs]}
+
+
+# ── 案件 CRUD ─────────────────────────────────────────────────────────────────
+
+def create_case(case_number: str, case_name: str, case_type: str = "一般",
+                investigator: str = "", description: str = "",
+                notes: str = "") -> int:
+    with _conn() as con:
+        cur = con.execute("""
+            INSERT INTO cases (case_number, case_name, case_type,
+                               investigator, description, notes)
+            VALUES (?,?,?,?,?,?)
+        """, (case_number, case_name, case_type, investigator, description, notes))
+        return cur.lastrowid
+
+
+def update_case(case_id: int, **kwargs):
+    allowed = {"case_name", "case_type", "status", "investigator",
+               "description", "notes"}
+    fields  = {k: v for k, v in kwargs.items() if k in allowed}
+    if not fields:
+        return
+    sets = ", ".join(f"{k}=?" for k in fields)
+    vals = list(fields.values()) + [case_id]
+    with _conn() as con:
+        con.execute(
+            f"UPDATE cases SET {sets}, updated_at=datetime('now','localtime') WHERE id=?",
+            vals
+        )
+
+
+def delete_case(case_id: int):
+    with _conn() as con:
+        con.execute("DELETE FROM cases WHERE id=?", (case_id,))
+
+
+def get_all_cases() -> list[dict]:
+    with _conn() as con:
+        rows = con.execute(
+            "SELECT * FROM cases ORDER BY created_at DESC"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_case(case_id: int) -> dict | None:
+    with _conn() as con:
+        row = con.execute("SELECT * FROM cases WHERE id=?", (case_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def get_case_wallets(case_id: int) -> list[dict]:
+    with _conn() as con:
+        rows = con.execute(
+            "SELECT * FROM wallets WHERE case_id=? ORDER BY analyzed_at DESC",
+            (case_id,)
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_case_tx_lookups(case_id: int) -> list[dict]:
+    with _conn() as con:
+        rows = con.execute(
+            "SELECT * FROM tx_lookups WHERE case_id=? ORDER BY queried_at DESC",
+            (case_id,)
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def link_wallet_to_case(wallet_id: int, case_id: int, label: str = ""):
+    with _conn() as con:
+        con.execute(
+            "UPDATE wallets SET case_id=?, label=COALESCE(NULLIF(?,''), label) WHERE id=?",
+            (case_id, label, wallet_id)
+        )
+        con.execute(
+            "UPDATE cases SET updated_at=datetime('now','localtime') WHERE id=?",
+            (case_id,)
+        )
+
+
+def link_tx_lookup_to_case(lookup_id: int, case_id: int):
+    with _conn() as con:
+        con.execute(
+            "UPDATE tx_lookups SET case_id=? WHERE id=?",
+            (case_id, lookup_id)
+        )
+        con.execute(
+            "UPDATE cases SET updated_at=datetime('now','localtime') WHERE id=?",
+            (case_id,)
+        )
+
+
+def unlink_wallet_from_case(wallet_id: int):
+    with _conn() as con:
+        con.execute("UPDATE wallets SET case_id=NULL WHERE id=?", (wallet_id,))
+
+
+def unlink_tx_lookup_from_case(lookup_id: int):
+    with _conn() as con:
+        con.execute("UPDATE tx_lookups SET case_id=NULL WHERE id=?", (lookup_id,))
+
+
+def next_case_number() -> str:
+    """自動產生案件編號，格式：CASE-YYYYMMDD-NNN"""
+    today = datetime.datetime.now().strftime("%Y%m%d")
+    with _conn() as con:
+        row = con.execute(
+            "SELECT COUNT(*) FROM cases WHERE case_number LIKE ?",
+            (f"CASE-{today}-%",)
+        ).fetchone()
+    seq = (row[0] or 0) + 1
+    return f"CASE-{today}-{seq:03d}"

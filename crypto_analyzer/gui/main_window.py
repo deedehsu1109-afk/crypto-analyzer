@@ -12,6 +12,7 @@ from analyzer.wallet_profiler import profile_eth, profile_trx, profile_btc
 from analyzer.tx_analyzer import analyze_eth_tx, analyze_trx_tx, analyze_btc_tx
 from exporter.report import export_excel, export_csv
 from database import db as _db
+from gui.case_window import CaseDialog, LinkToCaseDialog
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -21,10 +22,11 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("虛擬貨幣錢包分析工具 v1.0")
-        self.geometry("1100x740")
+        self.geometry("1200x760")
         self.resizable(True, True)
-        self.config_data = load_config()
+        self.config_data  = load_config()
         self._profile: dict | None = None
+        self._active_case: dict | None = None   # 目前選中的案件
         self._build_ui()
 
     # ── UI 建構 ────────────────────────────────────────────────────────────────
@@ -79,10 +81,46 @@ class App(ctk.CTk):
                                           command=self._open_settings)
         self.settings_btn.grid(row=0, column=7, padx=(4, 12), pady=10)
 
+        # ── 案件工具列（第二行）──
+        case_bar = ctk.CTkFrame(top, corner_radius=6, fg_color="#1a2744")
+        case_bar.grid(row=1, column=0, columnspan=8, sticky="ew",
+                      padx=12, pady=(0, 6))
+        case_bar.grid_columnconfigure(2, weight=1)
+
+        ctk.CTkLabel(case_bar, text="目前案件：",
+                     font=("Microsoft JhengHei", 12, "bold"),
+                     text_color="#aac4ff").grid(
+            row=0, column=0, padx=(12, 4), pady=5)
+
+        self._case_label = ctk.CTkLabel(
+            case_bar, text="（尚未選擇案件）",
+            font=("Microsoft JhengHei", 12),
+            text_color="#7eb8f7", anchor="w")
+        self._case_label.grid(row=0, column=1, padx=4, pady=5, sticky="w")
+
+        ctk.CTkButton(case_bar, text="選擇 / 切換案件", width=130,
+                      font=("Microsoft JhengHei", 11),
+                      fg_color="#2a4a8a",
+                      command=self._pick_case).grid(
+            row=0, column=3, padx=4, pady=5)
+
+        ctk.CTkButton(case_bar, text="＋ 新建案件", width=110,
+                      font=("Microsoft JhengHei", 11),
+                      fg_color="#1d6b3e",
+                      command=self._new_case_quick).grid(
+            row=0, column=4, padx=4, pady=5)
+
+        ctk.CTkButton(case_bar, text="清除選擇", width=80,
+                      font=("Microsoft JhengHei", 11),
+                      fg_color="gray35",
+                      command=self._clear_case).grid(
+            row=0, column=5, padx=(4, 12), pady=5)
+
         # 主內容（分頁）
         self.tabs = ctk.CTkTabview(self, corner_radius=10)
         self.tabs.grid(row=1, column=0, sticky="nsew", padx=12, pady=(4, 4))
-        for name in ["錢包摘要", "授權對象", "原始交易", "Token 轉帳", "交易 Hash 分析", "查詢歷史"]:
+        for name in ["錢包摘要", "授權對象", "原始交易", "Token 轉帳",
+                     "交易 Hash 分析", "查詢歷史", "案件管理"]:
             self.tabs.add(name)
 
         self._build_summary_tab()
@@ -91,6 +129,7 @@ class App(ctk.CTk):
         self._build_tx_tab("Token 轉帳", "_token_tree")
         self._build_hash_tab()
         self._build_history_tab()
+        self._build_case_tab()
 
         # 底部狀態列
         self.status_var = tk.StringVar(value="就緒")
@@ -308,6 +347,252 @@ class App(ctk.CTk):
                 tree.delete(iid)
             except Exception:
                 pass
+
+    # ── 案件管理分頁 ───────────────────────────────────────────────────────────
+
+    def _build_case_tab(self):
+        tab = self.tabs.tab("案件管理")
+        tab.grid_columnconfigure(0, weight=2)
+        tab.grid_columnconfigure(1, weight=3)
+        tab.grid_rowconfigure(1, weight=1)
+
+        # ── 左側：案件清單 ──
+        left = ctk.CTkFrame(tab, corner_radius=8)
+        left.grid(row=0, column=0, rowspan=2, sticky="nsew", padx=(4, 2), pady=4)
+        left.grid_columnconfigure(0, weight=1)
+        left.grid_rowconfigure(1, weight=1)
+
+        # 標題 + 按鈕
+        hdr = ctk.CTkFrame(left, fg_color="transparent")
+        hdr.grid(row=0, column=0, sticky="ew", padx=8, pady=6)
+        ctk.CTkLabel(hdr, text="案件清單",
+                     font=("Microsoft JhengHei", 13, "bold")).pack(side="left")
+        ctk.CTkButton(hdr, text="＋ 新建", width=70,
+                      font=("Microsoft JhengHei", 11),
+                      fg_color="#1d6b3e",
+                      command=self._case_new).pack(side="right", padx=2)
+        ctk.CTkButton(hdr, text="✎ 編輯", width=70,
+                      font=("Microsoft JhengHei", 11),
+                      fg_color="#2a4a8a",
+                      command=self._case_edit).pack(side="right", padx=2)
+        ctk.CTkButton(hdr, text="🗑 刪除", width=70,
+                      font=("Microsoft JhengHei", 11),
+                      fg_color="#7a1f1f",
+                      command=self._case_delete).pack(side="right", padx=2)
+
+        # 案件表格
+        lf = ctk.CTkFrame(left, corner_radius=6)
+        lf.grid(row=1, column=0, sticky="nsew", padx=6, pady=(0, 6))
+        lf.grid_columnconfigure(0, weight=1)
+        lf.grid_rowconfigure(0, weight=1)
+        case_cols = ("案件編號", "案件名稱", "類型", "狀態", "承辦人")
+        self._case_tree = self._make_treeview(lf, case_cols)
+        for col, w in zip(case_cols, [110, 150, 60, 60, 80]):
+            self._case_tree.column(col, width=w, minwidth=50)
+        self._case_tree.bind("<<TreeviewSelect>>", self._on_case_select)
+        self._case_tree.bind("<Double-1>",
+                             lambda _: self._set_active_case_from_tree())
+
+        # ── 右側：案件詳細 ──
+        right = ctk.CTkFrame(tab, corner_radius=8)
+        right.grid(row=0, column=1, rowspan=2, sticky="nsew", padx=(2, 4), pady=4)
+        right.grid_columnconfigure(0, weight=1)
+        right.grid_rowconfigure(2, weight=1)
+        right.grid_rowconfigure(4, weight=1)
+
+        # 案件資訊標籤
+        self._case_info_lbl = ctk.CTkLabel(
+            right, text="← 點選左側案件查看詳情",
+            font=("Microsoft JhengHei", 12), text_color="gray60")
+        self._case_info_lbl.grid(row=0, column=0, padx=12, pady=(10, 2), sticky="w")
+
+        # 操作按鈕列
+        op_bar = ctk.CTkFrame(right, fg_color="transparent")
+        op_bar.grid(row=1, column=0, sticky="ew", padx=8, pady=4)
+        ctk.CTkButton(op_bar, text="設為目前案件", width=120,
+                      font=("Microsoft JhengHei", 11),
+                      fg_color="#1d5e8a",
+                      command=self._set_active_case_from_tree).pack(side="left", padx=4)
+        ctk.CTkButton(op_bar, text="移除錢包", width=90,
+                      font=("Microsoft JhengHei", 11),
+                      fg_color="gray35",
+                      command=self._case_unlink_wallet).pack(side="left", padx=4)
+        ctk.CTkButton(op_bar, text="移除 Hash", width=90,
+                      font=("Microsoft JhengHei", 11),
+                      fg_color="gray35",
+                      command=self._case_unlink_hash).pack(side="left", padx=4)
+
+        # 關聯錢包清單
+        ctk.CTkLabel(right, text="關聯錢包",
+                     font=("Microsoft JhengHei", 11, "bold")).grid(
+            row=2, column=0, padx=12, pady=(4, 0), sticky="w")
+        wf = ctk.CTkFrame(right, corner_radius=6)
+        wf.grid(row=3, column=0, sticky="nsew", padx=6, pady=(0, 4))
+        wf.grid_columnconfigure(0, weight=1)
+        wf.grid_rowconfigure(0, weight=1)
+        w_cols = ("鏈", "地址", "標籤", "發起", "接受", "Token 轉帳", "分析時間")
+        self._case_wallet_tree = self._make_treeview(wf, w_cols)
+        for col, w in zip(w_cols, [50, 200, 80, 50, 50, 70, 130]):
+            self._case_wallet_tree.column(col, width=w, minwidth=40)
+        right.grid_rowconfigure(3, weight=2)
+
+        # 關聯 Hash 清單
+        ctk.CTkLabel(right, text="關聯交易 Hash",
+                     font=("Microsoft JhengHei", 11, "bold")).grid(
+            row=4, column=0, padx=12, pady=(4, 0), sticky="w")
+        hf = ctk.CTkFrame(right, corner_radius=6)
+        hf.grid(row=5, column=0, sticky="nsew", padx=6, pady=(0, 6))
+        hf.grid_columnconfigure(0, weight=1)
+        hf.grid_rowconfigure(0, weight=1)
+        h_cols = ("鏈", "交易 Hash", "狀態", "發送方", "接收方", "金額", "查詢時間")
+        self._case_hash_tree = self._make_treeview(hf, h_cols)
+        for col, w in zip(h_cols, [50, 200, 60, 150, 150, 90, 130]):
+            self._case_hash_tree.column(col, width=w, minwidth=40)
+        right.grid_rowconfigure(5, weight=1)
+
+        self._selected_case_id: int | None = None
+        self._reload_case_list()
+
+    def _reload_case_list(self):
+        for iid in self._case_tree.get_children():
+            self._case_tree.delete(iid)
+        for c in _db.get_all_cases():
+            self._case_tree.insert("", "end", iid=str(c["id"]), values=(
+                c.get("case_number",""), c.get("case_name",""),
+                c.get("case_type",""), c.get("status",""),
+                c.get("investigator",""),
+            ))
+
+    def _on_case_select(self, _event=None):
+        sel = self._case_tree.selection()
+        if not sel:
+            return
+        case_id = int(sel[0])
+        self._selected_case_id = case_id
+        case = _db.get_case(case_id)
+        if not case:
+            return
+        # 更新資訊標籤
+        self._case_info_lbl.configure(
+            text=f"【{case['case_number']}】{case['case_name']}　"
+                 f"類型：{case['case_type']}　狀態：{case['status']}　"
+                 f"承辦：{case.get('investigator','—')}　"
+                 f"建立：{case.get('created_at','')}"
+        )
+        # 關聯錢包
+        for iid in self._case_wallet_tree.get_children():
+            self._case_wallet_tree.delete(iid)
+        for w in _db.get_case_wallets(case_id):
+            self._case_wallet_tree.insert("", "end", iid=str(w["id"]), values=(
+                w.get("chain",""), w.get("address",""),
+                w.get("label",""), w.get("out_count",0),
+                w.get("in_count",0), w.get("token_transfer_count",0),
+                w.get("analyzed_at",""),
+            ))
+        # 關聯 Hash
+        for iid in self._case_hash_tree.get_children():
+            self._case_hash_tree.delete(iid)
+        for h in _db.get_case_tx_lookups(case_id):
+            self._case_hash_tree.insert("", "end", iid=str(h["id"]), values=(
+                h.get("chain",""), h.get("tx_hash",""),
+                h.get("status",""), h.get("from_addr",""),
+                h.get("to_addr",""), h.get("value_str",""),
+                h.get("queried_at",""),
+            ))
+
+    def _set_active_case_from_tree(self, _event=None):
+        if not self._selected_case_id:
+            messagebox.showinfo("提示", "請先在左側選取一個案件")
+            return
+        case = _db.get_case(self._selected_case_id)
+        if case:
+            self._active_case = case
+            self._case_label.configure(
+                text=f"【{case['case_number']}】{case['case_name']}  "
+                     f"（{case['case_type']} · {case['status']}）"
+            )
+            self.status_var.set(f"目前案件已設為：{case['case_number']} {case['case_name']}")
+
+    def _case_new(self):
+        def on_save(c):
+            self._reload_case_list()
+        CaseDialog(self, on_save=on_save)
+
+    def _case_edit(self):
+        sel = self._case_tree.selection()
+        if not sel:
+            messagebox.showinfo("提示", "請先選取要編輯的案件")
+            return
+        case = _db.get_case(int(sel[0]))
+        if case:
+            def on_save(_):
+                self._reload_case_list()
+                self._on_case_select()
+            CaseDialog(self, case=case, on_save=on_save)
+
+    def _case_delete(self):
+        sel = self._case_tree.selection()
+        if not sel:
+            messagebox.showinfo("提示", "請先選取要刪除的案件")
+            return
+        case = _db.get_case(int(sel[0]))
+        if not case:
+            return
+        if not messagebox.askyesno("確認刪除",
+                f"確定刪除案件【{case['case_number']}】{case['case_name']}？\n"
+                "（關聯的錢包與 Hash 記錄不會被刪除，僅解除關聯）"):
+            return
+        _db.delete_case(int(sel[0]))
+        if self._active_case and self._active_case["id"] == int(sel[0]):
+            self._clear_case()
+        self._reload_case_list()
+        self._case_info_lbl.configure(text="← 點選左側案件查看詳情")
+
+    def _case_unlink_wallet(self):
+        sel = self._case_wallet_tree.selection()
+        if not sel:
+            messagebox.showinfo("提示", "請先選取要移除的錢包")
+            return
+        for iid in sel:
+            _db.unlink_wallet_from_case(int(iid))
+        self._on_case_select()
+
+    def _case_unlink_hash(self):
+        sel = self._case_hash_tree.selection()
+        if not sel:
+            messagebox.showinfo("提示", "請先選取要移除的 Hash 記錄")
+            return
+        for iid in sel:
+            _db.unlink_tx_lookup_from_case(int(iid))
+        self._on_case_select()
+
+    # ── 案件工具列方法 ─────────────────────────────────────────────────────────
+
+    def _pick_case(self):
+        def on_select(case):
+            self._active_case = case
+            self._case_label.configure(
+                text=f"【{case['case_number']}】{case['case_name']}  "
+                     f"（{case['case_type']} · {case['status']}）"
+            )
+            self.status_var.set(f"已切換案件：{case['case_number']} {case['case_name']}")
+        LinkToCaseDialog(self, title="選擇目前作業案件", on_select=on_select)
+
+    def _new_case_quick(self):
+        def on_save(c):
+            self._active_case = c
+            self._case_label.configure(
+                text=f"【{c['case_number']}】{c['case_name']}  "
+                     f"（{c['case_type']} · {c['status']}）"
+            )
+            self._reload_case_list()
+            self.status_var.set(f"新建案件：{c['case_number']} {c['case_name']}")
+        CaseDialog(self, on_save=on_save)
+
+    def _clear_case(self):
+        self._active_case = None
+        self._case_label.configure(text="（尚未選擇案件）")
+        self.status_var.set("已清除案件選擇")
 
     def _build_tx_tab(self, tab_name: str, attr: str):
         tab = self.tabs.tab(tab_name)
@@ -562,7 +847,8 @@ class App(ctk.CTk):
                 raw = api.get_transaction(tx_hash)
                 result = analyze_btc_tx(raw)
             try:
-                _db.save_tx_lookup(result)
+                case_id = self._active_case["id"] if self._active_case else None
+                _db.save_tx_lookup(result, case_id=case_id)
             except Exception:
                 pass
             self.after(0, self._update_hash_ui, result)
@@ -698,9 +984,11 @@ class App(ctk.CTk):
                 profile = profile_btc(address, txs)
 
             self._profile = profile
-            # 背景儲存至資料庫
+            # 背景儲存至資料庫並關聯案件
             try:
-                _db.save_wallet_profile(profile)
+                wallet_id = _db.save_wallet_profile(profile)
+                if self._active_case and wallet_id:
+                    _db.link_wallet_to_case(wallet_id, self._active_case["id"])
             except Exception:
                 pass
             self.after(0, self._update_ui, profile)
