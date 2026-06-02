@@ -35,86 +35,112 @@ class App(ctk.CTk):
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
 
-        # 頂部輸入區
+        # ── 第一行：查詢模式 + 輸入 + 操作 ──
         top = ctk.CTkFrame(self, corner_radius=10)
         top.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 4))
-        top.grid_columnconfigure(1, weight=1)
+        top.grid_columnconfigure(4, weight=1)  # addr_entry 佔滿
 
-        ctk.CTkLabel(top, text="區塊鏈：", font=("Microsoft JhengHei", 13)).grid(
-            row=0, column=0, padx=(12, 4), pady=10)
+        # 查詢模式切換
+        self._query_mode = ctk.StringVar(value="一般查詢")
+        mode_btn = ctk.CTkSegmentedButton(
+            top, values=["一般查詢", "專案查詢"],
+            variable=self._query_mode,
+            width=190,
+            font=("Microsoft JhengHei", 12),
+            command=self._on_mode_change)
+        mode_btn.grid(row=0, column=0, padx=(12, 6), pady=10)
+
+        ctk.CTkLabel(top, text="鏈：", font=("Microsoft JhengHei", 12)).grid(
+            row=0, column=1, padx=(4, 2), pady=10)
         self.chain_var = ctk.StringVar(value="ETH")
-        chain_menu = ctk.CTkOptionMenu(top, variable=self.chain_var,
-                                       values=["ETH", "TRX", "BTC"], width=90,
-                                       command=self._on_chain_change)
-        chain_menu.grid(row=0, column=1, padx=4, pady=10, sticky="w")
+        ctk.CTkOptionMenu(top, variable=self.chain_var,
+                          values=["ETH", "TRX", "BTC"], width=80,
+                          font=("Microsoft JhengHei", 11),
+                          command=self._on_chain_change).grid(
+            row=0, column=2, padx=2, pady=10)
 
-        ctk.CTkLabel(top, text="錢包地址：", font=("Microsoft JhengHei", 13)).grid(
-            row=0, column=2, padx=(12, 4), pady=10)
-        self.addr_entry = ctk.CTkEntry(top, placeholder_text="輸入錢包地址（貼上後自動偵測鏈）...",
-                                       width=440, font=("Consolas", 12))
-        self.addr_entry.grid(row=0, column=3, padx=4, pady=10, sticky="ew")
+        ctk.CTkLabel(top, text="錢包地址 / Hash：",
+                     font=("Microsoft JhengHei", 12)).grid(
+            row=0, column=3, padx=(8, 4), pady=10)
+        self.addr_entry = ctk.CTkEntry(
+            top, placeholder_text="輸入錢包地址或交易 Hash（自動偵測類型）",
+            font=("Consolas", 11))
+        self.addr_entry.grid(row=0, column=4, padx=4, pady=10, sticky="ew")
         self.addr_entry.bind("<FocusOut>", self._on_addr_focusout)
         self.addr_entry.bind("<KeyRelease>", self._on_addr_keyrelease)
         self._bind_entry_context_menu(self.addr_entry)
-        top.grid_columnconfigure(3, weight=1)
 
-        self.analyze_btn = ctk.CTkButton(top, text="開始分析", width=110,
-                                         font=("Microsoft JhengHei", 13, "bold"),
-                                         command=self._start_analysis)
-        self.analyze_btn.grid(row=0, column=4, padx=(8, 4), pady=10)
+        self.analyze_btn = ctk.CTkButton(
+            top, text="開始查詢", width=100,
+            font=("Microsoft JhengHei", 12, "bold"),
+            command=self._start_smart_query)
+        self.analyze_btn.grid(row=0, column=5, padx=(6, 2), pady=10)
 
-        self.export_excel_btn = ctk.CTkButton(top, text="匯出 Excel", width=110,
-                                              font=("Microsoft JhengHei", 12),
-                                              fg_color="#2d6a4f",
-                                              command=self._export_excel)
-        self.export_excel_btn.grid(row=0, column=5, padx=4, pady=10)
+        self._clear_btn = ctk.CTkButton(
+            top, text="清除結果", width=85,
+            font=("Microsoft JhengHei", 11),
+            fg_color="#6b3a1f",
+            command=self._clear_results)
+        self._clear_btn.grid(row=0, column=6, padx=2, pady=10)
 
-        self.export_csv_btn = ctk.CTkButton(top, text="匯出 CSV", width=110,
-                                            font=("Microsoft JhengHei", 12),
-                                            fg_color="#5e3a8a",
-                                            command=self._export_csv)
-        self.export_csv_btn.grid(row=0, column=6, padx=4, pady=10)
+        self.export_excel_btn = ctk.CTkButton(
+            top, text="匯出 Excel", width=95,
+            font=("Microsoft JhengHei", 11),
+            fg_color="#2d6a4f",
+            command=self._export_excel)
+        self.export_excel_btn.grid(row=0, column=7, padx=2, pady=10)
 
-        self.settings_btn = ctk.CTkButton(top, text="⚙ 設定", width=80,
-                                          font=("Microsoft JhengHei", 12),
-                                          fg_color="gray35",
-                                          command=self._open_settings)
-        self.settings_btn.grid(row=0, column=7, padx=(4, 12), pady=10)
+        self.export_csv_btn = ctk.CTkButton(
+            top, text="匯出 CSV", width=85,
+            font=("Microsoft JhengHei", 11),
+            fg_color="#5e3a8a",
+            command=self._export_csv)
+        self.export_csv_btn.grid(row=0, column=8, padx=2, pady=10)
 
-        # ── 案件工具列（第二行）──
-        case_bar = ctk.CTkFrame(top, corner_radius=6, fg_color="#1a2744")
-        case_bar.grid(row=1, column=0, columnspan=8, sticky="ew",
-                      padx=12, pady=(0, 6))
-        case_bar.grid_columnconfigure(2, weight=1)
+        self.settings_btn = ctk.CTkButton(
+            top, text="⚙ 設定", width=70,
+            font=("Microsoft JhengHei", 11),
+            fg_color="gray35",
+            command=self._open_settings)
+        self.settings_btn.grid(row=0, column=9, padx=(2, 12), pady=10)
 
-        ctk.CTkLabel(case_bar, text="目前案件：",
+        # ── 第二行：案件工具列（專案查詢模式下顯示）──
+        self._case_bar = ctk.CTkFrame(top, corner_radius=6, fg_color="#1a2744")
+        self._case_bar.grid(row=1, column=0, columnspan=10, sticky="ew",
+                            padx=12, pady=(0, 6))
+        self._case_bar.grid_columnconfigure(2, weight=1)
+
+        ctk.CTkLabel(self._case_bar, text="目前案件：",
                      font=("Microsoft JhengHei", 12, "bold"),
                      text_color="#aac4ff").grid(
             row=0, column=0, padx=(12, 4), pady=5)
 
         self._case_label = ctk.CTkLabel(
-            case_bar, text="（尚未選擇案件）",
+            self._case_bar, text="（尚未選擇案件，專案查詢需先選擇案件）",
             font=("Microsoft JhengHei", 12),
-            text_color="#7eb8f7", anchor="w")
+            text_color="#f5a623", anchor="w")
         self._case_label.grid(row=0, column=1, padx=4, pady=5, sticky="w")
 
-        ctk.CTkButton(case_bar, text="選擇 / 切換案件", width=130,
+        ctk.CTkButton(self._case_bar, text="選擇 / 切換案件", width=130,
                       font=("Microsoft JhengHei", 11),
                       fg_color="#2a4a8a",
                       command=self._pick_case).grid(
             row=0, column=3, padx=4, pady=5)
 
-        ctk.CTkButton(case_bar, text="＋ 新建案件", width=110,
+        ctk.CTkButton(self._case_bar, text="＋ 新建案件", width=110,
                       font=("Microsoft JhengHei", 11),
                       fg_color="#1d6b3e",
                       command=self._new_case_quick).grid(
             row=0, column=4, padx=4, pady=5)
 
-        ctk.CTkButton(case_bar, text="清除選擇", width=80,
+        ctk.CTkButton(self._case_bar, text="清除案件", width=80,
                       font=("Microsoft JhengHei", 11),
                       fg_color="gray35",
                       command=self._clear_case).grid(
             row=0, column=5, padx=(4, 12), pady=5)
+
+        # 預設隱藏案件列（一般查詢模式）
+        self._case_bar.grid_remove()
 
         # 主內容（分頁）
         self.tabs = ctk.CTkTabview(self, corner_radius=10)
@@ -739,6 +765,77 @@ class App(ctk.CTk):
 
     # ── 分析邏輯 ───────────────────────────────────────────────────────────────
 
+    # ── 查詢模式 ───────────────────────────────────────────────────────────────
+
+    def _on_mode_change(self, mode: str):
+        if mode == "專案查詢":
+            self._case_bar.grid()
+            if self._active_case:
+                self._case_label.configure(
+                    text=f"【{self._active_case['case_number']}】"
+                         f"{self._active_case['case_name']}",
+                    text_color="#7eb8f7")
+            else:
+                self._case_label.configure(
+                    text="（尚未選擇案件，專案查詢需先選擇案件）",
+                    text_color="#f5a623")
+        else:
+            self._case_bar.grid_remove()
+        self.status_var.set(f"已切換為【{mode}】模式" + (
+            "（結果不儲存至資料庫）" if mode == "一般查詢" else
+            "（結果將儲存並關聯案件）"))
+
+    def _start_smart_query(self):
+        """統一入口：自動判斷輸入為地址或 Hash，並依模式執行"""
+        text = self.addr_entry.get().strip()
+        if not text:
+            from tkinter import messagebox
+            messagebox.showwarning("缺少輸入", "請輸入錢包地址或交易 Hash")
+            return
+        # 專案查詢必須選擇案件
+        if self._query_mode.get() == "專案查詢" and not self._active_case:
+            from tkinter import messagebox
+            if not messagebox.askyesno("尚未選擇案件",
+                    "專案查詢需要先選擇案件。\n\n"
+                    "是否現在選擇案件？\n"
+                    "（選「否」將改以一般查詢執行，結果不儲存）"):
+                self._query_mode.set("一般查詢")
+                self._on_mode_change("一般查詢")
+            else:
+                self._pick_case()
+                return
+        # 判斷輸入類型
+        if self._is_tx_hash(text):
+            self._start_hash_analysis()
+        else:
+            self._start_analysis()
+
+    def _clear_results(self):
+        """清除目前所有查詢結果（一般查詢用）"""
+        self._profile = None
+        # 清除摘要
+        for _, val_lbl in self._summary_labels:
+            val_lbl.configure(text="—")
+        # 清除授權表格
+        for iid in self._approval_tree.get_children():
+            self._approval_tree.delete(iid)
+        # 清除交易/Token 表格（重設為空）
+        for attr in ("_tx_tree", "_token_tree"):
+            tree = getattr(self, attr, None)
+            if tree:
+                for iid in tree.get_children():
+                    tree.delete(iid)
+        # 清除 Hash 分析結果
+        for w in self._hash_detail_frame.winfo_children():
+            w.destroy()
+        for iid in self._hash_token_tree.get_children():
+            self._hash_token_tree.delete(iid)
+        # 清除輸入框
+        self.addr_entry.delete(0, "end")
+        if hasattr(self, "hash_entry"):
+            self.hash_entry.delete(0, "end")
+        self.status_var.set("查詢結果已清除")
+
     def _on_addr_focusout(self, _event=None):
         address = self.addr_entry.get().strip()
         if not address:
@@ -846,11 +943,13 @@ class App(ctk.CTk):
                 api = BitcoinAPI()
                 raw = api.get_transaction(tx_hash)
                 result = analyze_btc_tx(raw)
-            try:
-                case_id = self._active_case["id"] if self._active_case else None
-                _db.save_tx_lookup(result, case_id=case_id)
-            except Exception:
-                pass
+            # 專案查詢才儲存至資料庫
+            if self._query_mode.get() == "專案查詢":
+                try:
+                    case_id = self._active_case["id"] if self._active_case else None
+                    _db.save_tx_lookup(result, case_id=case_id)
+                except Exception:
+                    pass
             self.after(0, self._update_hash_ui, result)
         except Exception as e:
             self.after(0, self._on_hash_error, str(e))
@@ -913,7 +1012,16 @@ class App(ctk.CTk):
                 t.get("至", ""), t.get("金額", ""), t.get("合約", ""),
             ))
 
-        self.status_var.set(f"Hash 查詢完成｜{result.get('chain','')} - {result.get('狀態','')}")
+        mode = self._query_mode.get()
+        if mode == "一般查詢":
+            saved_hint = "【一般查詢－未儲存，清除後消失】"
+        else:
+            case_hint = (f"已存入【{self._active_case['case_number']}】"
+                         if self._active_case else "已儲存（未關聯案件）")
+            saved_hint = f"【專案查詢－{case_hint}】"
+        self.status_var.set(
+            f"Hash 查詢完成｜{result.get('chain','')} {result.get('狀態','')}　{saved_hint}"
+        )
 
     def _start_analysis(self):
         address = self.addr_entry.get().strip()
@@ -984,13 +1092,14 @@ class App(ctk.CTk):
                 profile = profile_btc(address, txs)
 
             self._profile = profile
-            # 背景儲存至資料庫並關聯案件
-            try:
-                wallet_id = _db.save_wallet_profile(profile)
-                if self._active_case and wallet_id:
-                    _db.link_wallet_to_case(wallet_id, self._active_case["id"])
-            except Exception:
-                pass
+            # 專案查詢才儲存至資料庫
+            if self._query_mode.get() == "專案查詢":
+                try:
+                    wallet_id = _db.save_wallet_profile(profile)
+                    if self._active_case and wallet_id:
+                        _db.link_wallet_to_case(wallet_id, self._active_case["id"])
+                except Exception:
+                    pass
             self.after(0, self._update_ui, profile)
         except Exception as e:
             self.after(0, self._on_error, str(e))
@@ -1103,7 +1212,16 @@ class App(ctk.CTk):
             )
             self.status_var.set(f"查無資料｜請確認地址是否正確")
         else:
-            self.status_var.set(f"分析完成｜共 {total} 筆交易｜授權 {len(p.get('approval_targets', []))} 筆")
+            mode = self._query_mode.get()
+            if mode == "一般查詢":
+                saved_hint = "【一般查詢－未儲存至資料庫，清除結果後資料消失】"
+            else:
+                case_hint = (f"已存入案件【{self._active_case['case_number']}】"
+                             if self._active_case else "已儲存（未關聯案件）")
+                saved_hint = f"【專案查詢－{case_hint}】"
+            self.status_var.set(
+                f"分析完成｜共 {total} 筆交易｜授權 {len(p.get('approval_targets', []))} 筆　{saved_hint}"
+            )
 
     def _rebuild_tree(self, attr: str, rows: list[dict]):
         old_tree = getattr(self, attr)
