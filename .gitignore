@@ -1,5 +1,7 @@
 # 資料庫與使用者設定（含 API Key，不上傳）
 crypto_analyzer/crypto_data.db
+crypto_analyzer/crypto_data.db-shm
+crypto_analyzer/crypto_data.db-wal
 crypto_analyzer/config.json
 
 # Python 快取
