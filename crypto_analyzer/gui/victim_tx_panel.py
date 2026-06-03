@@ -77,14 +77,22 @@ class VictimTxDialog(ctk.CTkToplevel):
         self.to_e.configure(width=380)
 
         # 金額 NT
-        self._lbl(f, "金額(NT)：", 4)
-        self.amt_e = self._entry(f, 4, "新台幣金額")
+        self._lbl(f, "金額(NT)*：", 4, True)
+        amt_frame = ctk.CTkFrame(f, fg_color="transparent")
+        amt_frame.grid(row=4, column=1, sticky="w", pady=5)
+        self.amt_e = ctk.CTkEntry(amt_frame, font=("Consolas", 11),
+                                   placeholder_text="被害人陳述之新台幣金額",
+                                   width=160)
+        self.amt_e.pack(side="left")
+        ctk.CTkLabel(amt_frame, text="元",
+                     font=("Microsoft JhengHei", 10),
+                     text_color="gray70").pack(side="left", padx=(4, 0))
 
         # 幣種
         self._lbl(f, "幣種*：", 5, True)
-        self.cur_var = ctk.StringVar(value="USDT")
         cur_frame = ctk.CTkFrame(f, fg_color="transparent")
         cur_frame.grid(row=5, column=1, sticky="w", pady=5)
+        self.cur_var = ctk.StringVar(value="USDT")
         ctk.CTkOptionMenu(cur_frame, variable=self.cur_var,
                           values=_CURRENCIES, width=100,
                           font=("Consolas", 11)).pack(side="left")
@@ -96,31 +104,70 @@ class VictimTxDialog(ctk.CTkToplevel):
         self.cur_other.pack(side="left")
 
         # 數量
-        self._lbl(f, "數量：", 6)
+        self._lbl(f, "數量*：", 6, True)
         qty_frame = ctk.CTkFrame(f, fg_color="transparent")
         qty_frame.grid(row=6, column=1, sticky="w", pady=5)
-        self.qty_e = ctk.CTkEntry(qty_frame, width=130, font=("Consolas", 11),
-                                   placeholder_text="幣種數量")
+        self.qty_e = ctk.CTkEntry(qty_frame, width=160, font=("Consolas", 11),
+                                   placeholder_text="被害人陳述之幣種數量")
         self.qty_e.pack(side="left")
-        self._fetch_btn = ctk.CTkButton(qty_frame, text="自動查詢匯率",
-                                        width=120, font=("Microsoft JhengHei", 10),
+        ctk.CTkLabel(qty_frame, text="（幣）",
+                     font=("Microsoft JhengHei", 10),
+                     text_color="gray70").pack(side="left", padx=(4, 0))
+
+        # 交易匯率（由金額/數量自動計算，可手動覆寫）
+        ctk.CTkLabel(f,
+                     text="交易匯率\n(NT/幣)：",
+                     font=("Microsoft JhengHei", 11, "bold"),
+                     text_color="#ffcc55",
+                     anchor="e", width=120).grid(
+            row=7, column=0, padx=(12, 4), pady=5, sticky="e")
+        rate_frame = ctk.CTkFrame(f, fg_color="transparent")
+        rate_frame.grid(row=7, column=1, sticky="w", pady=5)
+        self.rate_e = ctk.CTkEntry(rate_frame, font=("Consolas", 11),
+                                    width=140,
+                                    placeholder_text="自動計算")
+        self.rate_e.pack(side="left")
+        self._rate_hint = ctk.CTkLabel(
+            rate_frame,
+            text="= 金額(NT) ÷ 數量",
+            font=("Microsoft JhengHei", 9),
+            text_color="gray60")
+        self._rate_hint.pack(side="left", padx=(8, 0))
+
+        # 當日均價（市場行情參考，由 CoinGecko API 查詢）
+        ctk.CTkLabel(f,
+                     text="當日均價\n(市場行情)：",
+                     font=("Microsoft JhengHei", 11, "bold"),
+                     text_color="#aaffaa",
+                     anchor="e", width=120).grid(
+            row=8, column=0, padx=(12, 4), pady=5, sticky="e")
+        avg_frame = ctk.CTkFrame(f, fg_color="transparent")
+        avg_frame.grid(row=8, column=1, sticky="w", pady=5)
+        self.avg_e = ctk.CTkEntry(avg_frame, font=("Consolas", 11),
+                                   width=140,
+                                   placeholder_text="自動查詢")
+        self.avg_e.pack(side="left")
+        self._fetch_btn = ctk.CTkButton(avg_frame,
+                                        text="查詢市場行情",
+                                        width=110,
+                                        font=("Microsoft JhengHei", 10),
                                         fg_color="#2a4a8a",
                                         command=self._fetch_price)
         self._fetch_btn.pack(side="left", padx=(10, 0))
+        ctk.CTkLabel(avg_frame,
+                     text="（最高+最低）÷2，來源 CoinGecko",
+                     font=("Microsoft JhengHei", 9),
+                     text_color="gray60").pack(side="left", padx=(6, 0))
 
-        # 交易匯率
-        self._lbl(f, "交易匯率(NT/幣)：", 7)
-        self.rate_e = self._entry(f, 7, "自動或手動填入")
-
-        # 當日均價
-        self._lbl(f, "當日均價(NT)：", 8)
-        self.avg_e = self._entry(f, 8, "自動查詢或手動填入")
-
-        # 當日高低（唯讀參考）
+        # 當日高低（唯讀）
         self._lbl(f, "當日高/低(NT)：", 9)
         self.hl_lbl = ctk.CTkLabel(f, text="—",
                                    font=("Consolas", 10), text_color="gray60")
         self.hl_lbl.grid(row=9, column=1, padx=(4, 12), pady=2, sticky="w")
+
+        # 綁定自動計算交易匯率
+        self.amt_e.bind("<KeyRelease>", self._auto_calc_rate)
+        self.qty_e.bind("<KeyRelease>", self._auto_calc_rate)
 
         # 備註
         self._lbl(f, "備註：", 10)
@@ -167,26 +214,46 @@ class VictimTxDialog(ctk.CTkToplevel):
         c = self.cur_other.get().strip().upper()
         return c if c else self.cur_var.get()
 
-    def _fetch_price(self):
-        date  = self.date_e.get().strip()
-        cur   = self._get_currency()
-        qty_s = self.qty_e.get().strip().replace(",", "")
+    def _auto_calc_rate(self, _event=None):
+        """金額或數量變動時，自動計算交易匯率 = 金額(NT) / 數量"""
         amt_s = self.amt_e.get().strip().replace(",", "")
+        qty_s = self.qty_e.get().strip().replace(",", "")
+        try:
+            amt = float(amt_s) if amt_s else None
+            qty = float(qty_s) if qty_s else None
+            if amt and qty and qty > 0:
+                rate = round(amt / qty, 4)
+                self.rate_e.delete(0, "end")
+                self.rate_e.insert(0, str(rate))
+                self._rate_hint.configure(
+                    text=f"= {amt:,.0f} ÷ {qty:,.6f} = {rate:,.4f}",
+                    text_color="#ffcc55")
+            else:
+                self._rate_hint.configure(
+                    text="= 金額(NT) ÷ 數量",
+                    text_color="gray60")
+        except (ValueError, ZeroDivisionError):
+            pass
+
+    def _fetch_price(self):
+        """查詢當日市場行情（當日均價），不覆蓋交易匯率"""
+        date = self.date_e.get().strip()
+        cur  = self._get_currency()
         if not date or not cur:
             messagebox.showwarning("缺少資訊", "請先填入日期與幣種", parent=self)
             return
         self._fetch_btn.configure(state="disabled", text="查詢中…")
-        qty = float(qty_s) if qty_s else None
-        amt = float(amt_s) if amt_s else None
 
         def do_fetch():
-            result = fetch_exchange_rate(cur, date, qty, amt)
-            self.after(0, self._fill_price, result)
+            from api.price_fetcher import fetch_exchange_rate
+            result = fetch_exchange_rate(cur, date)  # 不傳 qty/amt，僅查市場行情
+            self.after(0, self._fill_market_price, result)
 
         threading.Thread(target=do_fetch, daemon=True).start()
 
-    def _fill_price(self, result: dict):
-        self._fetch_btn.configure(state="normal", text="自動查詢匯率")
+    def _fill_market_price(self, result: dict):
+        """只更新市場行情欄位（當日均價/高/低），不覆蓋交易匯率"""
+        self._fetch_btn.configure(state="normal", text="查詢市場行情")
         if result.get("error"):
             messagebox.showerror("查詢失敗", result["error"], parent=self)
             return
@@ -194,10 +261,10 @@ class VictimTxDialog(ctk.CTkToplevel):
         def _set_entry(e, val):
             if val is not None:
                 e.delete(0, "end")
-                e.insert(0, str(val))
+                e.insert(0, f"{val:,.4f}")
 
-        _set_entry(self.rate_e, result.get("exchange_rate"))
-        _set_entry(self.avg_e,  result.get("daily_avg"))
+        # 只填當日均價，不動交易匯率
+        _set_entry(self.avg_e, result.get("daily_avg"))
         h = result.get("daily_high")
         l = result.get("daily_low")
         if h and l:
@@ -476,18 +543,19 @@ class VictimTxPanel(ctk.CTkFrame):
             return
 
         def do_batch():
+            from api.price_fetcher import calc_exchange_rate
             for r in missing:
-                result = fetch_exchange_rate(
-                    r["currency"], r["tx_date"],
-                    r.get("quantity"), r.get("amount_ntd")
-                )
+                # 只查市場行情（當日均價），不覆蓋交易匯率
+                result = fetch_exchange_rate(r["currency"], r["tx_date"])
                 if result.get("daily_avg"):
-                    r["daily_avg"]     = result["daily_avg"]
-                    r["daily_high"]    = result.get("daily_high")
-                    r["daily_low"]     = result.get("daily_low")
-                    if not r.get("exchange_rate"):
-                        r["exchange_rate"] = result.get("exchange_rate")
-                    _db.upsert_victim_transaction(self.case_id, r)
+                    r["daily_avg"]  = result["daily_avg"]
+                    r["daily_high"] = result.get("daily_high")
+                    r["daily_low"]  = result.get("daily_low")
+                # 若交易匯率空白且有金額+數量，則由被害人陳述計算
+                if not r.get("exchange_rate"):
+                    r["exchange_rate"] = calc_exchange_rate(
+                        r.get("amount_ntd"), r.get("quantity"))
+                _db.upsert_victim_transaction(self.case_id, r)
             self.after(0, self._load)
             self.after(0, lambda: messagebox.showinfo(
                 "查詢完成", f"已完成 {len(missing)} 筆匯率查詢"))

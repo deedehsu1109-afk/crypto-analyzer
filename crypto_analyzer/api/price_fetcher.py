@@ -130,36 +130,40 @@ def fetch_exchange_rate(currency: str, date_str: str,
                         quantity: float = None,
                         amount_ntd: float = None) -> dict:
     """
-    查詢指定幣種在指定日期的台幣價格。
-    若提供 quantity 與 amount_ntd 可計算實際交易匯率。
+    查詢指定幣種在指定日期的台幣市場行情。
+
+    注意：
+    - 「交易匯率」= 被害人陳述之 金額(NT) ÷ 數量，應由呼叫端自行計算
+    - 本函式只回傳市場行情（當日最高/最低/均價），不計算交易匯率
 
     回傳：
     {
-        "daily_high": float,   # 當日最高價 (NT)
-        "daily_low":  float,   # 當日最低價 (NT)
-        "daily_avg":  float,   # 當日均價 = (high+low)/2
-        "exchange_rate": float # 實際交易匯率（amount_ntd/quantity）或使用均價
+        "daily_high": float,   # 當日最高價 (NT)，市場行情
+        "daily_low":  float,   # 當日最低價 (NT)，市場行情
+        "daily_avg":  float,   # 當日均價 = (high+low)/2，市場行情
     }
     """
     coin_id = get_coin_id(currency)
     if not coin_id:
         return {
             "error": f"無法識別幣種：{currency}",
-            "daily_high": None, "daily_low": None,
-            "daily_avg": None, "exchange_rate": None,
+            "daily_high": None, "daily_low": None, "daily_avg": None,
         }
 
     prices = get_daily_twd_price(coin_id, date_str)
 
-    exchange_rate = None
-    if quantity and amount_ntd and quantity > 0:
-        exchange_rate = round(amount_ntd / quantity, 4)
-    elif prices.get("avg"):
-        exchange_rate = prices["avg"]
-
     return {
-        "daily_high":    prices.get("high"),
-        "daily_low":     prices.get("low"),
-        "daily_avg":     prices.get("avg"),
-        "exchange_rate": exchange_rate,
+        "daily_high": prices.get("high"),
+        "daily_low":  prices.get("low"),
+        "daily_avg":  prices.get("avg"),
     }
+
+
+def calc_exchange_rate(amount_ntd: float, quantity: float) -> float | None:
+    """
+    計算被害人陳述的交易匯率。
+    交易匯率（NT/幣）= 金額(NT) ÷ 數量
+    """
+    if amount_ntd and quantity and quantity > 0:
+        return round(amount_ntd / quantity, 4)
+    return None
