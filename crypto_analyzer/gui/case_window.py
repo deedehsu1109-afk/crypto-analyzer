@@ -242,17 +242,6 @@ class CaseDialog(ctk.CTkToplevel):
         if not paths:
             return
 
-        # 先自動儲存案件（確保有 case_id）
-        if not self._case_id:
-            if not self._name_e.get().strip():
-                messagebox.showwarning(
-                    "需要案件名稱",
-                    "請先填寫案件名稱，系統將自動儲存後再匯入文件。",
-                    parent=self)
-                return
-            if not self._auto_save():
-                return
-
         self._desc_t.insert("end", "\n\n【分析中，請稍候…】")
         self.update_idletasks()
 
