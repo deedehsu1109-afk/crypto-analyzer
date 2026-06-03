@@ -256,17 +256,22 @@ class CaseDialog(ctk.CTkToplevel):
         self._desc_t.insert("end", "\n\n【分析中，請稍候…】")
         self.update_idletasks()
 
+        # 在主執行緒先取得目前描述內容（Tkinter 不允許從背景執行緒存取 widget）
+        cur_desc_snapshot = self._desc_t.get("1.0", "end").strip()
+
         def do_import():
-            from analyzer.doc_transaction_extractor import (
-                analyze_files, summarize_for_case)
-            result  = analyze_files(list(paths))
-            summary = summarize_for_case(result["raw_text"])
-            # 更新描述
-            cur_desc = self._desc_t.get("1.0", "end").strip()
-            cur_desc = cur_desc.replace("【分析中，請稍候…】", "").strip()
-            new_desc = ((cur_desc + "\n\n") if cur_desc else "") + \
-                       "【文件分析摘要】\n" + summary
-            self.after(0, self._fill_desc, new_desc, result)
+            try:
+                from analyzer.doc_transaction_extractor import (
+                    analyze_files, summarize_for_case)
+                result  = analyze_files(list(paths))
+                summary = summarize_for_case(result["raw_text"])
+                cur_desc = cur_desc_snapshot.replace("【分析中，請稍候…】", "").strip()
+                new_desc = ((cur_desc + "\n\n") if cur_desc else "") + \
+                           "【文件分析摘要】\n" + summary
+                self.after(0, self._fill_desc, new_desc, result)
+            except Exception as e:
+                self.after(0, lambda err=e: messagebox.showerror(
+                    "分析失敗", f"文件分析時發生錯誤：\n{err}", parent=self))
 
         threading.Thread(target=do_import, daemon=True).start()
 
