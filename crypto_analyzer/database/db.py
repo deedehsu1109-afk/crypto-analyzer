@@ -446,14 +446,15 @@ def search_address(keyword: str) -> list[dict]:
 # ── 案件 CRUD ─────────────────────────────────────────────────────────────────
 
 def create_case(case_number: str, case_name: str, case_type: str = "一般",
-                investigator: str = "", description: str = "",
-                notes: str = "") -> int:
+                status: str = "進行中", investigator: str = "",
+                description: str = "", notes: str = "") -> int:
     with _conn() as con:
         cur = con.execute("""
             INSERT INTO cases (case_number, case_name, case_type,
-                               investigator, description, notes)
-            VALUES (?,?,?,?,?,?)
-        """, (case_number, case_name, case_type, investigator, description, notes))
+                               status, investigator, description, notes)
+            VALUES (?,?,?,?,?,?,?)
+        """, (case_number, case_name, case_type, status,
+              investigator, description, notes))
         return cur.lastrowid
 
 
