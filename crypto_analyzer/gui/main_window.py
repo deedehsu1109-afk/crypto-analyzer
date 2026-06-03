@@ -10,6 +10,9 @@ from api.tronscan import TronScanAPI
 from api.bitcoin import BitcoinAPI
 from analyzer.wallet_profiler import profile_eth, profile_trx, profile_btc
 from analyzer.tx_analyzer import analyze_eth_tx, analyze_trx_tx, analyze_btc_tx
+from analyzer.time_filter import (parse_datetime_str, ts_to_str,
+                                   filter_by_range, filter_centered,
+                                   check_overflow, suggest_increase, MAX_TOTAL)
 from exporter.report import export_excel, export_csv
 from database import db as _db
 from gui.case_window import CaseDialog, LinkToCaseDialog
@@ -142,6 +145,75 @@ class App(ctk.CTk):
         # 預設隱藏案件列（一般查詢模式）
         self._case_bar.grid_remove()
 
+        # ── 時間篩選列（第三行，可折疊）──
+        self._time_bar_visible = False
+        self._time_toggle_btn = ctk.CTkButton(
+            top, text="⏱ 時間篩選 ▼", width=120,
+            font=("Microsoft JhengHei", 11),
+            fg_color="#3a3a5a",
+            command=self._toggle_time_bar)
+        self._time_toggle_btn.grid(row=2, column=0, padx=(12, 4), pady=(0, 6), sticky="w")
+
+        self._time_bar = ctk.CTkFrame(top, corner_radius=6, fg_color="#1e1e2e")
+        self._time_bar.grid(row=3, column=0, columnspan=10, sticky="ew",
+                            padx=12, pady=(0, 6))
+
+        # 起始時間
+        ctk.CTkLabel(self._time_bar, text="起始時間：",
+                     font=("Microsoft JhengHei", 11, "bold"),
+                     text_color="#aaffaa").grid(
+            row=0, column=0, padx=(12, 4), pady=6)
+        self._time_start = ctk.CTkEntry(
+            self._time_bar, width=160, font=("Consolas", 11),
+            placeholder_text="YYYY-MM-DD HH:MM:SS")
+        self._time_start.grid(row=0, column=1, padx=4, pady=6)
+        self._bind_entry_context_menu(self._time_start)
+
+        ctk.CTkLabel(self._time_bar, text="迄止時間：",
+                     font=("Microsoft JhengHei", 11, "bold"),
+                     text_color="#ffccaa").grid(
+            row=0, column=2, padx=(16, 4), pady=6)
+        self._time_end = ctk.CTkEntry(
+            self._time_bar, width=160, font=("Consolas", 11),
+            placeholder_text="YYYY-MM-DD HH:MM:SS（選填）")
+        self._time_end.grid(row=0, column=3, padx=4, pady=6)
+        self._bind_entry_context_menu(self._time_end)
+
+        # 置中模式下的前後各N筆
+        ctk.CTkLabel(self._time_bar, text="（僅設起始時）前後各：",
+                     font=("Microsoft JhengHei", 10),
+                     text_color="gray70").grid(
+            row=0, column=4, padx=(16, 2), pady=6)
+        self._time_each = ctk.CTkEntry(
+            self._time_bar, width=55, font=("Consolas", 11))
+        self._time_each.insert(0, "50")
+        self._time_each.grid(row=0, column=5, padx=2, pady=6)
+        ctk.CTkLabel(self._time_bar, text="筆",
+                     font=("Microsoft JhengHei", 10),
+                     text_color="gray70").grid(row=0, column=6, padx=(2, 8), pady=6)
+
+        # 模式說明標籤
+        self._time_mode_lbl = ctk.CTkLabel(
+            self._time_bar, text="尚未設定時間",
+            font=("Microsoft JhengHei", 10), text_color="gray60")
+        self._time_mode_lbl.grid(row=0, column=7, padx=8, pady=6, sticky="w")
+        self._time_bar.grid_columnconfigure(7, weight=1)
+
+        # 清除時間設定按鈕
+        ctk.CTkButton(self._time_bar, text="清除時間", width=80,
+                      font=("Microsoft JhengHei", 10),
+                      fg_color="gray35",
+                      command=self._clear_time_filter).grid(
+            row=0, column=8, padx=(4, 12), pady=6)
+
+        # 綁定即時更新
+        self._time_start.bind("<KeyRelease>", self._on_time_change)
+        self._time_end.bind("<KeyRelease>", self._on_time_change)
+        self._time_each.bind("<KeyRelease>", self._on_time_change)
+
+        # 預設隱藏
+        self._time_bar.grid_remove()
+
         # 主內容（分頁）
         self.tabs = ctk.CTkTabview(self, corner_radius=10)
         self.tabs.grid(row=1, column=0, sticky="nsew", padx=12, pady=(4, 4))
@@ -201,6 +273,15 @@ class App(ctk.CTk):
             val.grid(row=i, column=1, padx=(4, 12), pady=3 if is_sub else 5, sticky="w")
             self._bind_label_copy_menu(val)
             self._summary_labels.append((lbl, val))
+
+        # 時間篩選說明列
+        self._tf_info_lbl = ctk.CTkLabel(
+            frame, text="",
+            font=("Microsoft JhengHei", 11), anchor="w",
+            text_color="#ffcc55", wraplength=700)
+        self._tf_info_lbl.grid(
+            row=len(fields), column=0, columnspan=2,
+            padx=12, pady=(4, 8), sticky="w")
 
     def _build_approvals_tab(self):
         tab = self.tabs.tab("授權對象")
@@ -767,6 +848,149 @@ class App(ctk.CTk):
 
     # ── 查詢模式 ───────────────────────────────────────────────────────────────
 
+    # ── 時間篩選 UI 方法 ────────────────────────────────────────────────────────
+
+    def _toggle_time_bar(self):
+        self._time_bar_visible = not self._time_bar_visible
+        if self._time_bar_visible:
+            self._time_bar.grid()
+            self._time_toggle_btn.configure(text="⏱ 時間篩選 ▲")
+        else:
+            self._time_bar.grid_remove()
+            self._time_toggle_btn.configure(text="⏱ 時間篩選 ▼")
+
+    def _on_time_change(self, _event=None):
+        s_str = self._time_start.get().strip()
+        e_str = self._time_end.get().strip()
+        each  = self._time_each.get().strip()
+        s_ts  = parse_datetime_str(s_str)
+        e_ts  = parse_datetime_str(e_str)
+        if not s_str:
+            self._time_mode_lbl.configure(text="尚未設定時間", text_color="gray60")
+        elif s_ts and e_ts:
+            if e_ts < s_ts:
+                self._time_mode_lbl.configure(text="⚠ 迄止時間不可早於起始時間",
+                                              text_color="#ff7070")
+            else:
+                diff = e_ts - s_ts
+                h, m = divmod(diff // 60, 60)
+                d, h = divmod(h, 24)
+                self._time_mode_lbl.configure(
+                    text=f"範圍模式：{d}天{h}時{m}分  "
+                         f"{ts_to_str(s_ts)} ～ {ts_to_str(e_ts)}",
+                    text_color="#aaffaa")
+        elif s_ts:
+            try:
+                n = int(each) if each else 50
+                n = max(1, min(n, MAX_TOTAL // 2))
+            except ValueError:
+                n = 50
+            self._time_mode_lbl.configure(
+                text=f"置中模式：以 {ts_to_str(s_ts)} 為軸心，前後各 {n} 筆",
+                text_color="#ffccaa")
+        else:
+            self._time_mode_lbl.configure(text="⚠ 時間格式錯誤",
+                                          text_color="#ff7070")
+
+    def _get_time_filter(self) -> dict | None:
+        """
+        回傳時間篩選設定 dict；未啟用回傳 None；格式錯誤顯示訊息並回傳 None。
+        dict keys: mode ("range"|"center"), start_ts, end_ts, each_side
+        """
+        if not self._time_bar_visible:
+            return None
+        s_str = self._time_start.get().strip()
+        e_str = self._time_end.get().strip()
+        if not s_str:
+            return None
+        s_ts = parse_datetime_str(s_str)
+        if not s_ts:
+            messagebox.showerror("時間格式錯誤",
+                                 f"起始時間格式錯誤：{s_str}\n"
+                                 "正確格式：YYYY-MM-DD HH:MM:SS")
+            return None
+        e_ts = parse_datetime_str(e_str) if e_str else None
+        if e_str and not e_ts:
+            messagebox.showerror("時間格式錯誤",
+                                 f"迄止時間格式錯誤：{e_str}\n"
+                                 "正確格式：YYYY-MM-DD HH:MM:SS")
+            return None
+        if e_ts and e_ts < s_ts:
+            messagebox.showerror("時間設定錯誤", "迄止時間不可早於起始時間")
+            return None
+        try:
+            each = int(self._time_each.get().strip() or "50")
+            each = max(1, min(each, MAX_TOTAL // 2))
+        except ValueError:
+            each = 50
+
+        if e_ts:
+            return {"mode": "range", "start_ts": s_ts, "end_ts": e_ts,
+                    "each_side": each}
+        return {"mode": "center", "start_ts": s_ts, "end_ts": None,
+                "each_side": each}
+
+    def _clear_time_filter(self):
+        self._time_start.delete(0, "end")
+        self._time_end.delete(0, "end")
+        self._time_each.delete(0, "end")
+        self._time_each.insert(0, "50")
+        self._time_mode_lbl.configure(text="時間篩選已清除", text_color="gray60")
+
+    def _apply_time_filter_to_profile(self, profile: dict,
+                                       tf: dict) -> dict | None:
+        """
+        對已抓取的 profile 套用時間篩選。
+        回傳修改後的 profile，若使用者取消則回傳 None。
+        """
+        chain = profile.get("chain", "ETH")
+        raw   = profile.get("raw_txs", []) + profile.get("raw_erc20",
+                            profile.get("raw_trc20", []))
+        if not raw:
+            return profile
+
+        if tf["mode"] == "range":
+            filtered = filter_by_range(raw, chain, tf["start_ts"], tf["end_ts"])
+            warn = check_overflow(len(filtered), MAX_TOTAL)
+            if warn:
+                ans = messagebox.askyesno("交易筆數超過上限", warn)
+                if not ans:
+                    filtered = filtered[:MAX_TOTAL]
+            profile["raw_txs"]  = [t for t in filtered
+                                    if t.get("timeStamp") or t.get("timestamp")
+                                    or t.get("time")]
+            profile["_time_filter_applied"] = (
+                f"範圍篩選：{ts_to_str(tf['start_ts'])} ～ "
+                f"{ts_to_str(tf['end_ts'])}，共 {len(filtered)} 筆"
+            )
+
+        else:  # center
+            res = filter_centered(raw, chain, tf["start_ts"], tf["each_side"])
+            sug = suggest_increase(tf["each_side"],
+                                   res["total_available_before"],
+                                   res["total_available_after"])
+            if sug:
+                ans = messagebox.askyesno("建議增加筆數", sug)
+                if ans:
+                    new_each = min(
+                        max(res["total_available_before"],
+                            res["total_available_after"]),
+                        MAX_TOTAL // 2)
+                    res = filter_centered(raw, chain, tf["start_ts"], new_each)
+                    tf["each_side"] = new_each
+            pivot = res.get("pivot_tx")
+            pivot_time = ts_to_str(
+                int(pivot.get("timeStamp", pivot.get("timestamp",
+                              pivot.get("time", 0))) or 0)
+            ) if pivot else "N/A"
+            profile["raw_txs"] = res["result"]
+            profile["_time_filter_applied"] = (
+                f"置中篩選：軸心 {ts_to_str(tf['start_ts'])}（最近交易 {pivot_time}），"
+                f"前 {res['before']} 筆 + 後 {res['after']} 筆，共 {len(res['result'])} 筆"
+            )
+
+        return profile
+
     def _on_mode_change(self, mode: str):
         if mode == "專案查詢":
             self._case_bar.grid()
@@ -1053,14 +1277,18 @@ class App(ctk.CTk):
             messagebox.showwarning("缺少 API Key", "請先在設定中填入 Etherscan API Key")
             return
 
+        # 取得時間篩選設定（格式有誤時已顯示訊息，回傳 None 表示不篩選）
+        tf = self._get_time_filter()
+
         self.analyze_btn.configure(state="disabled")
         self.status_var.set("分析中，請稍候...")
         self.progress.grid()
         self.progress.start()
         self._profile = None
-        threading.Thread(target=self._run_analysis, args=(chain, address), daemon=True).start()
+        threading.Thread(target=self._run_analysis,
+                         args=(chain, address, tf), daemon=True).start()
 
-    def _run_analysis(self, chain: str, address: str):
+    def _run_analysis(self, chain: str, address: str, tf: dict | None):
         try:
             if chain == "ETH":
                 api = EtherscanAPI(self.config_data["etherscan_api_key"])
@@ -1072,13 +1300,16 @@ class App(ctk.CTk):
                 self._set_status("正在抓取 ERC-20 轉帳記錄...")
                 erc20    = api.get_erc20_transfers(address)
                 self._set_status("正在分析授權紀錄...")
-                approvals = api.get_token_approvals(txs, address)  # 不重複呼叫 API
+                approvals = api.get_token_approvals(txs, address)
                 profile  = profile_eth(address, txs, int_txs, erc20, approvals)
 
             elif chain == "TRX":
                 api = TronScanAPI()
                 self._set_status("正在抓取 TRX 交易資料...")
-                txs      = api.get_transactions(address)
+                # TronScan 支援直接傳遞時間戳
+                s_ts = tf["start_ts"] if tf and tf["mode"] == "range" else None
+                e_ts = tf["end_ts"]   if tf and tf["mode"] == "range" else None
+                txs      = api.get_transactions(address, start_ts=s_ts, end_ts=e_ts)
                 self._set_status("正在抓取 TRC-20 轉帳...")
                 trc20    = api.get_trc20_transfers(address)
                 self._set_status("正在分析授權紀錄...")
@@ -1090,6 +1321,11 @@ class App(ctk.CTk):
                 self._set_status("正在抓取 BTC 交易資料...")
                 txs     = api.get_transactions(address)
                 profile = profile_btc(address, txs)
+
+            # 套用時間篩選（ETH / BTC 採後端篩選；TRX range 已由 API 篩選）
+            if tf and not (chain == "TRX" and tf["mode"] == "range"):
+                self._set_status("正在套用時間篩選...")
+                profile = self._apply_time_filter_sync(profile, tf)
 
             self._profile = profile
             # 專案查詢才儲存至資料庫
@@ -1103,6 +1339,81 @@ class App(ctk.CTk):
             self.after(0, self._update_ui, profile)
         except Exception as e:
             self.after(0, self._on_error, str(e))
+
+    def _apply_time_filter_sync(self, profile: dict, tf: dict) -> dict:
+        """在分析執行緒中套用時間篩選（需要彈窗詢問時透過 after 排程）"""
+        chain = profile.get("chain", "ETH")
+        raw   = profile.get("raw_txs", [])
+        erc20 = profile.get("raw_erc20", [])
+        trc20 = profile.get("raw_trc20", [])
+        all_txs = raw + erc20 + trc20
+
+        if tf["mode"] == "range":
+            filtered_raw  = filter_by_range(raw,   chain, tf["start_ts"], tf["end_ts"])
+            filtered_erc  = filter_by_range(erc20, chain, tf["start_ts"], tf["end_ts"])
+            filtered_trc  = filter_by_range(trc20, chain, tf["start_ts"], tf["end_ts"])
+            total = len(filtered_raw) + len(filtered_erc) + len(filtered_trc)
+            warn  = check_overflow(total, MAX_TOTAL)
+            if warn:
+                # 在主執行緒彈窗
+                import queue
+                q = queue.Queue()
+                def ask():
+                    q.put(messagebox.askyesno("交易筆數超過上限", warn))
+                self.after(0, ask)
+                ans = q.get(timeout=60)
+                if not ans:
+                    filtered_raw = filtered_raw[:MAX_TOTAL]
+                    filtered_erc = []
+                    filtered_trc = []
+            profile["raw_txs"]  = filtered_raw
+            if erc20: profile["raw_erc20"] = filtered_erc
+            if trc20: profile["raw_trc20"] = filtered_trc
+            profile["_time_filter_applied"] = (
+                f"範圍篩選 {ts_to_str(tf['start_ts'])} ～ {ts_to_str(tf['end_ts'])}，"
+                f"共 {len(filtered_raw)+len(filtered_erc)+len(filtered_trc)} 筆"
+            )
+
+        else:  # center
+            res = filter_centered(all_txs, chain, tf["start_ts"], tf["each_side"])
+            sug = suggest_increase(tf["each_side"],
+                                   res["total_available_before"],
+                                   res["total_available_after"])
+            if sug:
+                import queue
+                q = queue.Queue()
+                def ask_sug():
+                    q.put(messagebox.askyesno("建議增加筆數", sug))
+                self.after(0, ask_sug)
+                ans = q.get(timeout=60)
+                if ans:
+                    new_each = min(
+                        max(res["total_available_before"],
+                            res["total_available_after"]),
+                        MAX_TOTAL // 2)
+                    res = filter_centered(all_txs, chain,
+                                          tf["start_ts"], new_each)
+                    tf["each_side"] = new_each
+
+            pivot    = res.get("pivot_tx") or {}
+            raw_ts   = (pivot.get("timeStamp") or pivot.get("timestamp") or
+                        pivot.get("time") or 0)
+            try:
+                ms = int(raw_ts)
+                if ms > 1e12: ms //= 1000
+            except Exception:
+                ms = 0
+            pivot_time = ts_to_str(ms) if ms else "N/A"
+
+            profile["raw_txs"] = res["result"]
+            if "raw_erc20" in profile: profile["raw_erc20"] = []
+            if "raw_trc20" in profile: profile["raw_trc20"] = []
+            profile["_time_filter_applied"] = (
+                f"置中篩選 軸心 {ts_to_str(tf['start_ts'])}（最近 {pivot_time}），"
+                f"前 {res['before']} 筆＋後 {res['after']} 筆，共 {len(res['result'])} 筆"
+            )
+
+        return profile
 
     def _set_status(self, msg: str):
         self.after(0, self.status_var.set, msg)
@@ -1172,6 +1483,13 @@ class App(ctk.CTk):
 
         for (_, val_lbl), val in zip(self._summary_labels, values):
             val_lbl.configure(text=val)
+
+        # 時間篩選說明（若有）
+        tf_info = p.get("_time_filter_applied")
+        if hasattr(self, "_tf_info_lbl"):
+            self._tf_info_lbl.configure(
+                text=f"⏱ {tf_info}" if tf_info else "",
+                text_color="#ffcc55" if tf_info else "gray60")
 
         # 授權
         for row in self._approval_tree.get_children():

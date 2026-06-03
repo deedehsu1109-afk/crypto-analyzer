@@ -30,17 +30,24 @@ class TronScanAPI:
         balance_sun = data.get("balance", 0)
         return balance_sun / 1_000_000
 
-    def get_transactions(self, address: str, limit: int = 10000) -> list[dict]:
+    def get_transactions(self, address: str, limit: int = 10000,
+                         start_ts: int = None, end_ts: int = None) -> list[dict]:
         results = []
         start = 0
         page_size = 50
+        params_base: dict = {
+            "address": address,
+            "limit": page_size,
+            "sort": "-timestamp",
+        }
+        # TronScan 支援 min_timestamp / max_timestamp（毫秒）
+        if start_ts:
+            params_base["min_timestamp"] = start_ts * 1000
+        if end_ts:
+            params_base["max_timestamp"] = end_ts * 1000
+
         while len(results) < limit:
-            data = self._get("transaction", {
-                "address": address,
-                "start": start,
-                "limit": page_size,
-                "sort": "-timestamp",
-            })
+            data = self._get("transaction", {**params_base, "start": start})
             txs = data.get("data", [])
             if not txs:
                 break
