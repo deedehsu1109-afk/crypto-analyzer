@@ -16,6 +16,7 @@ from analyzer.time_filter import (parse_datetime_str, ts_to_str,
 from exporter.report import export_excel, export_csv
 from database import db as _db
 from gui.case_window import CaseDialog, LinkToCaseDialog
+from gui.victim_tx_panel import VictimTxPanel
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -459,37 +460,57 @@ class App(ctk.CTk):
 
     def _build_case_tab(self):
         tab = self.tabs.tab("案件管理")
-        tab.grid_columnconfigure(0, weight=2)
-        tab.grid_columnconfigure(1, weight=3)
-        tab.grid_rowconfigure(1, weight=1)
+        tab.grid_columnconfigure(0, weight=1)
+        tab.grid_rowconfigure(0, weight=1)
 
-        # ── 左側：案件清單 ──
-        left = ctk.CTkFrame(tab, corner_radius=8)
-        left.grid(row=0, column=0, rowspan=2, sticky="nsew", padx=(4, 2), pady=4)
+        # 主容器：左右分割
+        pane = ctk.CTkFrame(tab, corner_radius=0, fg_color="transparent")
+        pane.grid(row=0, column=0, sticky="nsew")
+        pane.grid_columnconfigure(0, weight=2)
+        pane.grid_columnconfigure(1, weight=5)
+        pane.grid_rowconfigure(0, weight=1)
+
+        # ── 左側：案件清單 + 匯入工具 ──
+        left = ctk.CTkFrame(pane, corner_radius=8)
+        left.grid(row=0, column=0, sticky="nsew", padx=(4, 2), pady=4)
         left.grid_columnconfigure(0, weight=1)
-        left.grid_rowconfigure(1, weight=1)
+        left.grid_rowconfigure(2, weight=1)
 
-        # 標題 + 按鈕
+        # 標題 + 操作按鈕
         hdr = ctk.CTkFrame(left, fg_color="transparent")
         hdr.grid(row=0, column=0, sticky="ew", padx=8, pady=6)
         ctk.CTkLabel(hdr, text="案件清單",
                      font=("Microsoft JhengHei", 13, "bold")).pack(side="left")
-        ctk.CTkButton(hdr, text="＋ 新建", width=70,
-                      font=("Microsoft JhengHei", 11),
-                      fg_color="#1d6b3e",
-                      command=self._case_new).pack(side="right", padx=2)
-        ctk.CTkButton(hdr, text="✎ 編輯", width=70,
-                      font=("Microsoft JhengHei", 11),
+        for txt, color, cmd in [
+            ("＋ 新建", "#1d6b3e", self._case_new),
+            ("✎ 編輯",  "#2a4a8a", self._case_edit),
+            ("🗑 刪除", "#7a1f1f", self._case_delete),
+        ]:
+            ctk.CTkButton(hdr, text=txt, width=68,
+                          font=("Microsoft JhengHei", 10),
+                          fg_color=color, command=cmd).pack(side="right", padx=1)
+
+        # ── 匯入案件編號列 ──
+        imp_bar = ctk.CTkFrame(left, fg_color="#1a2744", corner_radius=6)
+        imp_bar.grid(row=1, column=0, sticky="ew", padx=6, pady=(0, 4))
+        imp_bar.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(imp_bar, text="匯入案件編號：",
+                     font=("Microsoft JhengHei", 10, "bold"),
+                     text_color="#aac4ff").grid(
+            row=0, column=0, padx=(8, 4), pady=5)
+        self._import_num_entry = ctk.CTkEntry(
+            imp_bar, font=("Consolas", 10),
+            placeholder_text="輸入案件編號（如 CASE-20260603-001）")
+        self._import_num_entry.grid(row=0, column=1, padx=4, pady=5, sticky="ew")
+        ctk.CTkButton(imp_bar, text="匯入", width=60,
+                      font=("Microsoft JhengHei", 10),
                       fg_color="#2a4a8a",
-                      command=self._case_edit).pack(side="right", padx=2)
-        ctk.CTkButton(hdr, text="🗑 刪除", width=70,
-                      font=("Microsoft JhengHei", 11),
-                      fg_color="#7a1f1f",
-                      command=self._case_delete).pack(side="right", padx=2)
+                      command=self._import_by_case_number).grid(
+            row=0, column=2, padx=(4, 8), pady=5)
 
         # 案件表格
         lf = ctk.CTkFrame(left, corner_radius=6)
-        lf.grid(row=1, column=0, sticky="nsew", padx=6, pady=(0, 6))
+        lf.grid(row=2, column=0, sticky="nsew", padx=6, pady=(0, 6))
         lf.grid_columnconfigure(0, weight=1)
         lf.grid_rowconfigure(0, weight=1)
         case_cols = ("案件編號", "案件名稱", "類型", "狀態", "承辦人")
@@ -500,62 +521,77 @@ class App(ctk.CTk):
         self._case_tree.bind("<Double-1>",
                              lambda _: self._set_active_case_from_tree())
 
-        # ── 右側：案件詳細 ──
-        right = ctk.CTkFrame(tab, corner_radius=8)
-        right.grid(row=0, column=1, rowspan=2, sticky="nsew", padx=(2, 4), pady=4)
+        # ── 右側：案件詳細（分頁式）──
+        right = ctk.CTkFrame(pane, corner_radius=8)
+        right.grid(row=0, column=1, sticky="nsew", padx=(2, 4), pady=4)
         right.grid_columnconfigure(0, weight=1)
-        right.grid_rowconfigure(2, weight=1)
-        right.grid_rowconfigure(4, weight=1)
+        right.grid_rowconfigure(1, weight=1)
 
-        # 案件資訊標籤
+        # 案件資訊列
+        info_bar = ctk.CTkFrame(right, fg_color="transparent")
+        info_bar.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 2))
+        info_bar.grid_columnconfigure(0, weight=1)
+
         self._case_info_lbl = ctk.CTkLabel(
-            right, text="← 點選左側案件查看詳情",
-            font=("Microsoft JhengHei", 12), text_color="gray60")
-        self._case_info_lbl.grid(row=0, column=0, padx=12, pady=(10, 2), sticky="w")
+            info_bar, text="← 點選左側案件查看詳情",
+            font=("Microsoft JhengHei", 11), text_color="gray60", anchor="w")
+        self._case_info_lbl.grid(row=0, column=0, sticky="w")
 
-        # 操作按鈕列
-        op_bar = ctk.CTkFrame(right, fg_color="transparent")
-        op_bar.grid(row=1, column=0, sticky="ew", padx=8, pady=4)
-        ctk.CTkButton(op_bar, text="設為目前案件", width=120,
-                      font=("Microsoft JhengHei", 11),
-                      fg_color="#1d5e8a",
-                      command=self._set_active_case_from_tree).pack(side="left", padx=4)
-        ctk.CTkButton(op_bar, text="移除錢包", width=90,
-                      font=("Microsoft JhengHei", 11),
-                      fg_color="gray35",
-                      command=self._case_unlink_wallet).pack(side="left", padx=4)
-        ctk.CTkButton(op_bar, text="移除 Hash", width=90,
-                      font=("Microsoft JhengHei", 11),
-                      fg_color="gray35",
-                      command=self._case_unlink_hash).pack(side="left", padx=4)
+        op_bar = ctk.CTkFrame(info_bar, fg_color="transparent")
+        op_bar.grid(row=1, column=0, sticky="w", pady=(2, 0))
+        for txt, color, cmd in [
+            ("設為目前案件",   "#1d5e8a", self._set_active_case_from_tree),
+            ("從文件匯入描述", "#4a3a7a", self._import_doc_to_desc),
+            ("移除錢包",       "gray35",  self._case_unlink_wallet),
+            ("移除 Hash",      "gray35",  self._case_unlink_hash),
+        ]:
+            ctk.CTkButton(op_bar, text=txt, width=110,
+                          font=("Microsoft JhengHei", 10),
+                          fg_color=color, command=cmd).pack(side="left", padx=2)
 
-        # 關聯錢包清單
-        ctk.CTkLabel(right, text="關聯錢包",
-                     font=("Microsoft JhengHei", 11, "bold")).grid(
-            row=2, column=0, padx=12, pady=(4, 0), sticky="w")
-        wf = ctk.CTkFrame(right, corner_radius=6)
-        wf.grid(row=3, column=0, sticky="nsew", padx=6, pady=(0, 4))
+        # 右側內容分頁
+        right_tabs = ctk.CTkTabview(right, corner_radius=8)
+        right_tabs.grid(row=1, column=0, sticky="nsew", padx=4, pady=(2, 4))
+        for tname in ["關聯錢包", "關聯 Hash", "被害人陳述交易紀錄"]:
+            right_tabs.add(tname)
+        self._right_tabs = right_tabs
+
+        # 關聯錢包分頁
+        wt = right_tabs.tab("關聯錢包")
+        wt.grid_columnconfigure(0, weight=1)
+        wt.grid_rowconfigure(0, weight=1)
+        wf = ctk.CTkFrame(wt, corner_radius=6)
+        wf.grid(row=0, column=0, sticky="nsew")
         wf.grid_columnconfigure(0, weight=1)
         wf.grid_rowconfigure(0, weight=1)
         w_cols = ("鏈", "地址", "標籤", "發起", "接受", "Token 轉帳", "分析時間")
         self._case_wallet_tree = self._make_treeview(wf, w_cols)
         for col, w in zip(w_cols, [50, 200, 80, 50, 50, 70, 130]):
             self._case_wallet_tree.column(col, width=w, minwidth=40)
-        right.grid_rowconfigure(3, weight=2)
 
-        # 關聯 Hash 清單
-        ctk.CTkLabel(right, text="關聯交易 Hash",
-                     font=("Microsoft JhengHei", 11, "bold")).grid(
-            row=4, column=0, padx=12, pady=(4, 0), sticky="w")
-        hf = ctk.CTkFrame(right, corner_radius=6)
-        hf.grid(row=5, column=0, sticky="nsew", padx=6, pady=(0, 6))
+        # 關聯 Hash 分頁
+        ht = right_tabs.tab("關聯 Hash")
+        ht.grid_columnconfigure(0, weight=1)
+        ht.grid_rowconfigure(0, weight=1)
+        hf = ctk.CTkFrame(ht, corner_radius=6)
+        hf.grid(row=0, column=0, sticky="nsew")
         hf.grid_columnconfigure(0, weight=1)
         hf.grid_rowconfigure(0, weight=1)
         h_cols = ("鏈", "交易 Hash", "狀態", "發送方", "接收方", "金額", "查詢時間")
         self._case_hash_tree = self._make_treeview(hf, h_cols)
         for col, w in zip(h_cols, [50, 200, 60, 150, 150, 90, 130]):
             self._case_hash_tree.column(col, width=w, minwidth=40)
-        right.grid_rowconfigure(5, weight=1)
+
+        # 被害人陳述交易記錄分頁（延遲建立，選到案件後初始化）
+        self._victim_tx_panel: VictimTxPanel | None = None
+        self._victim_tx_tab_frame = right_tabs.tab("被害人陳述交易紀錄")
+        self._victim_tx_tab_frame.grid_columnconfigure(0, weight=1)
+        self._victim_tx_tab_frame.grid_rowconfigure(0, weight=1)
+        ctk.CTkLabel(
+            self._victim_tx_tab_frame,
+            text="← 請先在左側選取案件",
+            font=("Microsoft JhengHei", 12), text_color="gray60"
+        ).grid(row=0, column=0)
 
         self._selected_case_id: int | None = None
         self._reload_case_list()
@@ -606,6 +642,15 @@ class App(ctk.CTk):
                 h.get("to_addr",""), h.get("value_str",""),
                 h.get("queried_at",""),
             ))
+        # 被害人陳述交易紀錄面板（建立或更新）
+        if self._victim_tx_panel is None:
+            for w in self._victim_tx_tab_frame.winfo_children():
+                w.destroy()
+            self._victim_tx_panel = VictimTxPanel(
+                self._victim_tx_tab_frame, case_id)
+            self._victim_tx_panel.grid(row=0, column=0, sticky="nsew")
+        else:
+            self._victim_tx_panel.set_case(case_id)
 
     def _set_active_case_from_tree(self, _event=None):
         if not self._selected_case_id:
@@ -619,6 +664,73 @@ class App(ctk.CTk):
                      f"（{case['case_type']} · {case['status']}）"
             )
             self.status_var.set(f"目前案件已設為：{case['case_number']} {case['case_name']}")
+
+    def _import_by_case_number(self):
+        """依案件編號匯入（選取）進行中的案件"""
+        num = self._import_num_entry.get().strip()
+        if not num:
+            messagebox.showwarning("缺少輸入", "請輸入案件編號")
+            return
+        case = _db.get_case_by_number(num)
+        if not case:
+            messagebox.showerror("找不到案件",
+                                 f"找不到案件編號：{num}\n請確認編號是否正確。")
+            return
+        # 在清單中選中並展開
+        iid = str(case["id"])
+        if iid in self._case_tree.get_children():
+            self._case_tree.selection_set(iid)
+            self._case_tree.see(iid)
+            self._on_case_select()
+        self._import_num_entry.delete(0, "end")
+        self.status_var.set(f"已匯入案件：{case['case_number']} {case['case_name']}")
+
+    def _import_doc_to_desc(self):
+        """從文件資料夾分析內容，摘要填入案件描述"""
+        if not self._selected_case_id:
+            messagebox.showinfo("提示", "請先選取案件")
+            return
+        folder = filedialog.askdirectory(title="選擇文件資料夾")
+        if not folder:
+            return
+
+        self.status_var.set("正在分析資料夾內文件，請稍候…")
+        self.update_idletasks()
+
+        def do_import():
+            from analyzer.doc_transaction_extractor import (
+                analyze_folder, summarize_for_case)
+            result = analyze_folder(folder)
+            summary = summarize_for_case(result["raw_text"])
+            # 更新案件描述
+            case = _db.get_case(self._selected_case_id)
+            old_desc = case.get("description", "") or ""
+            new_desc  = (old_desc + "\n\n【文件分析摘要】\n" + summary
+                         if old_desc else "【文件分析摘要】\n" + summary)
+            _db.update_case(self._selected_case_id, description=new_desc)
+            # 匯入交易記錄
+            imported = 0
+            for t in result["transactions"]:
+                _db.upsert_victim_transaction(self._selected_case_id, t)
+                imported += 1
+            proc  = len(result["processed_files"])
+            err   = len(result["error_files"])
+            self.after(0, self._finish_doc_import, proc, err, imported)
+
+        threading.Thread(target=do_import, daemon=True).start()
+
+    def _finish_doc_import(self, processed, errors, imported):
+        self._reload_case_list()
+        self._on_case_select()
+        if self._victim_tx_panel:
+            self._victim_tx_panel._load()
+        self.status_var.set(
+            f"文件分析完成：處理 {processed} 份，錯誤 {errors} 份，"
+            f"匯入 {imported} 筆交易記錄")
+        messagebox.showinfo("匯入完成",
+                            f"已處理 {processed} 份文件（{errors} 份失敗）\n"
+                            f"案件描述已更新\n"
+                            f"交易記錄匯入 {imported} 筆（請逐一確認修正）")
 
     def _case_new(self):
         def on_save(c):

@@ -114,12 +114,34 @@ def init_db():
             UNIQUE(chain, tx_hash)
         );
 
+        -- ── 被害人陳述交易紀錄 ───────────────────────────────────────────────
+        CREATE TABLE IF NOT EXISTS victim_transactions (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id       INTEGER REFERENCES cases(id) ON DELETE CASCADE,
+            tx_date       TEXT,         -- 日期 YYYY-MM-DD
+            tx_time       TEXT,         -- 時間 HH:MM:SS（UTC+8）
+            from_addr     TEXT,         -- FROM 錢包地址（全碼）
+            to_addr       TEXT,         -- TO 錢包地址（全碼）
+            amount_ntd    REAL,         -- 金額（新台幣 NT）
+            quantity      REAL,         -- 數量（幣種單位）
+            currency      TEXT,         -- 幣種（BTC/ETH/USDT/...）
+            exchange_rate REAL,         -- 交易匯率（NT/幣種）
+            daily_avg     REAL,         -- 當日均價（(最高+最低)/2，NT）
+            daily_high    REAL,         -- 當日最高價（NT）
+            daily_low     REAL,         -- 當日最低價（NT）
+            source_doc    TEXT,         -- 來源文件路徑
+            notes         TEXT,         -- 備註
+            created_at    TEXT DEFAULT (datetime('now','localtime')),
+            updated_at    TEXT DEFAULT (datetime('now','localtime'))
+        );
+
         -- ── 索引 ──────────────────────────────────────────────────────────────
         CREATE INDEX IF NOT EXISTS idx_txs_wallet    ON transactions(wallet_id);
         CREATE INDEX IF NOT EXISTS idx_txs_hash      ON transactions(tx_hash);
         CREATE INDEX IF NOT EXISTS idx_txs_addr      ON transactions(address);
         CREATE INDEX IF NOT EXISTS idx_approvals_wid ON approvals(wallet_id);
         CREATE INDEX IF NOT EXISTS idx_lookup_hash   ON tx_lookups(tx_hash);
+        CREATE INDEX IF NOT EXISTS idx_victim_tx_case ON victim_transactions(case_id);
         """)
         # 遷移：對舊資料庫補欄位（若尚未存在）
         _migrate(con)
@@ -531,3 +553,52 @@ def next_case_number() -> str:
         ).fetchone()
     seq = (row[0] or 0) + 1
     return f"CASE-{today}-{seq:03d}"
+
+
+def get_case_by_number(case_number: str) -> dict | None:
+    with _conn() as con:
+        row = con.execute(
+            "SELECT * FROM cases WHERE case_number=?", (case_number,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+# ── 被害人陳述交易紀錄 CRUD ────────────────────────────────────────────────────
+
+def get_victim_transactions(case_id: int) -> list[dict]:
+    with _conn() as con:
+        rows = con.execute(
+            "SELECT * FROM victim_transactions WHERE case_id=? "
+            "ORDER BY tx_date, tx_time",
+            (case_id,)
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def upsert_victim_transaction(case_id: int, data: dict) -> int:
+    """新增或更新一筆被害人陳述交易。含 id 則更新，否則新增。"""
+    row_id = data.get("id")
+    fields = ["tx_date", "tx_time", "from_addr", "to_addr",
+              "amount_ntd", "quantity", "currency",
+              "exchange_rate", "daily_avg", "daily_high", "daily_low",
+              "source_doc", "notes"]
+    if row_id:
+        sets = ", ".join(f"{f}=?" for f in fields)
+        sets += ", updated_at=datetime('now','localtime')"
+        vals = [data.get(f) for f in fields] + [row_id]
+        with _conn() as con:
+            con.execute(f"UPDATE victim_transactions SET {sets} WHERE id=?", vals)
+        return row_id
+    else:
+        cols = ", ".join(["case_id"] + fields)
+        qs   = ", ".join(["?"] * (len(fields) + 1))
+        vals = [case_id] + [data.get(f) for f in fields]
+        with _conn() as con:
+            cur = con.execute(
+                f"INSERT INTO victim_transactions ({cols}) VALUES ({qs})", vals)
+            return cur.lastrowid
+
+
+def delete_victim_transaction(tx_id: int):
+    with _conn() as con:
+        con.execute("DELETE FROM victim_transactions WHERE id=?", (tx_id,))
