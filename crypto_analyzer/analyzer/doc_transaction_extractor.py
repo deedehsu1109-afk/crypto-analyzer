@@ -49,13 +49,17 @@ def extract_text_from_file(path: str) -> str:
     if ext not in SUPPORTED_EXT:
         return ""
     try:
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"   # 確保子程序 stdout 為 UTF-8
         result = subprocess.run(
             [sys.executable, EXTRACT_SCRIPT, path, "--pretty"],
-            capture_output=True, text=True, timeout=60, encoding="utf-8"
+            capture_output=True, timeout=60,
+            env=env
         )
+        stdout = result.stdout.decode("utf-8", errors="replace")
         if result.returncode != 0:
             return ""
-        data = json.loads(result.stdout)
+        data = json.loads(stdout)
         # 依格式整合文字
         parts = []
         for page in data.get("pages", []):
@@ -161,6 +165,38 @@ def _parse_transactions(text: str) -> list[dict]:
         t["amount_ntd"], t["quantity"], t["currency"]
     ])]
     return txs
+
+
+def analyze_files(file_paths: list) -> dict:
+    """處理指定的文件列表（使用者直接選取檔案）"""
+    all_text  = []
+    all_txs   = []
+    processed = []
+    errors    = []
+
+    for fpath in file_paths:
+        fname = os.path.basename(fpath)
+        ext   = os.path.splitext(fname)[1].lower()
+        if ext not in SUPPORTED_EXT or not os.path.isfile(fpath):
+            errors.append(fname)
+            continue
+        text = extract_text_from_file(fpath)
+        if not text:
+            errors.append(fname)
+            continue
+        processed.append(fname)
+        all_text.append(f"【{fname}】\n{text[:3000]}")
+        txs = _parse_transactions(text)
+        for t in txs:
+            t["source_doc"] = fname
+        all_txs.extend(txs)
+
+    return {
+        "processed_files":  processed,
+        "error_files":      errors,
+        "raw_text":         "\n\n".join(all_text)[:5000],
+        "transactions":     all_txs,
+    }
 
 
 def analyze_folder(folder: str) -> dict:

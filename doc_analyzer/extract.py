@@ -8,6 +8,13 @@ from __future__ import annotations
 import sys
 import os
 import json
+
+# 強制 stdout 使用 UTF-8，避免 CP950/Big5 無法編碼特殊字元
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 import argparse
 import datetime
 
@@ -363,8 +370,12 @@ def main():
     result["file_size"] = os.path.getsize(path)
 
     indent = 2 if args.pretty else None
-    print(json.dumps(result, ensure_ascii=False, indent=indent,
-                     default=str))
+    output = json.dumps(result, ensure_ascii=False, indent=indent,
+                        default=str)
+    # 直接寫入 bytes，避免 stdout 編碼問題（CP950/Big5 環境）
+    sys.stdout.buffer.write(output.encode("utf-8"))
+    sys.stdout.buffer.write(b"\n")
+    sys.stdout.buffer.flush()
 
 if __name__ == "__main__":
     main()

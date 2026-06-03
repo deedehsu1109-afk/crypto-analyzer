@@ -135,12 +135,12 @@ class CaseDialog(ctk.CTkToplevel):
         lbl("案件描述：", 5)
         desc_ctrl = ctk.CTkFrame(tab, fg_color="transparent")
         desc_ctrl.grid(row=4, column=1, sticky="w", padx=(4, 8), pady=(4, 0))
-        ctk.CTkButton(desc_ctrl, text="📂 從資料夾文件匯入摘要", width=180,
+        ctk.CTkButton(desc_ctrl, text="📄 從文件匯入摘要", width=160,
                       font=("Microsoft JhengHei", 10),
                       fg_color="#4a3a7a",
                       command=self._import_folder_to_desc).pack(side="left")
         ctk.CTkLabel(desc_ctrl,
-                     text="（自動分析資料夾內 PDF/DOCX/XLSX/ODT 並摘要）",
+                     text="（可多選 PDF/DOCX/XLSX/ODT 文件，自動摘要）",
                      font=("Microsoft JhengHei", 9),
                      text_color="gray60").pack(side="left", padx=6)
 
@@ -227,9 +227,19 @@ class CaseDialog(ctk.CTkToplevel):
     # ── 從資料夾匯入摘要 ──────────────────────────────────────────────────────
 
     def _import_folder_to_desc(self):
-        folder = filedialog.askdirectory(
-            title="選擇案件文件資料夾", parent=self)
-        if not folder:
+        paths = filedialog.askopenfilenames(
+            title="選擇案件文件（可多選）",
+            filetypes=[
+                ("支援文件", "*.pdf *.docx *.doc *.xlsx *.odt *.txt"),
+                ("PDF", "*.pdf"),
+                ("Word", "*.docx *.doc"),
+                ("Excel", "*.xlsx"),
+                ("ODT", "*.odt"),
+                ("文字", "*.txt"),
+                ("全部", "*.*"),
+            ],
+            parent=self)
+        if not paths:
             return
 
         # 先自動儲存案件（確保有 case_id）
@@ -248,8 +258,8 @@ class CaseDialog(ctk.CTkToplevel):
 
         def do_import():
             from analyzer.doc_transaction_extractor import (
-                analyze_folder, summarize_for_case)
-            result  = analyze_folder(folder)
+                analyze_files, summarize_for_case)
+            result  = analyze_files(list(paths))
             summary = summarize_for_case(result["raw_text"])
             # 更新描述
             cur_desc = self._desc_t.get("1.0", "end").strip()
