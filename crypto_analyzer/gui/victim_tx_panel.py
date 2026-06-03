@@ -165,9 +165,12 @@ class VictimTxDialog(ctk.CTkToplevel):
                                    font=("Consolas", 10), text_color="gray60")
         self.hl_lbl.grid(row=9, column=1, padx=(4, 12), pady=2, sticky="w")
 
-        # 綁定自動計算交易匯率
-        self.amt_e.bind("<KeyRelease>", self._auto_calc_rate)
-        self.qty_e.bind("<KeyRelease>", self._auto_calc_rate)
+        # 綁定自動計算交易匯率（KeyRelease + Paste 延遲 + FocusOut 覆蓋所有輸入方式）
+        for _w in (self.amt_e, self.qty_e):
+            _w.bind("<KeyRelease>", self._auto_calc_rate)
+            _w.bind("<FocusOut>",   self._auto_calc_rate)
+            _w.bind("<<Paste>>",
+                    lambda _e: self.after(50, self._auto_calc_rate))
 
         # 備註
         self._lbl(f, "備註：", 10)
@@ -209,6 +212,9 @@ class VictimTxDialog(ctk.CTkToplevel):
         l = row.get("daily_low")
         if h and l:
             self.hl_lbl.configure(text=f"高 {h:,.2f} ／ 低 {l:,.2f}")
+        # 若資料庫無匯率但有金額+數量，自動計算
+        if not row.get("exchange_rate"):
+            self._auto_calc_rate()
 
     def _get_currency(self) -> str:
         c = self.cur_other.get().strip().upper()
