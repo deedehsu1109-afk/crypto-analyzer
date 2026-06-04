@@ -29,43 +29,93 @@ def _check_dep(pkg: str) -> bool:
 
 # ── PDF ──────────────────────────────────────────────────────────────────────
 
+def _parse_page_range(pages: str, total: int):
+    if not pages:
+        return 0, total
+    parts = pages.split("-")
+    start = int(parts[0]) - 1
+    end   = int(parts[1]) if len(parts) > 1 else start + 1
+    return max(0, start), min(end, total)
+
+
+def _extract_pdf_pypdf(path: str, start: int, end: int):
+    """用 pypdf 提取，回傳 (texts, meta) 或 (None, None) 若失敗"""
+    try:
+        import pypdf
+        reader = pypdf.PdfReader(path)
+        meta   = reader.metadata or {}
+        texts  = []
+        for i in range(start, end):
+            txt = reader.pages[i].extract_text() or ""
+            texts.append({"page": i + 1, "text": txt.strip()})
+        return texts, meta
+    except Exception:
+        return None, None
+
+
+def _extract_pdf_pdfplumber(path: str, start: int, end: int):
+    """用 pdfplumber 提取（中文 PDF 備援），回傳 texts 或 None"""
+    try:
+        import pdfplumber
+        texts = []
+        with pdfplumber.open(path) as pdf:
+            for i in range(start, end):
+                if i >= len(pdf.pages):
+                    break
+                txt = pdf.pages[i].extract_text() or ""
+                texts.append({"page": i + 1, "text": txt.strip()})
+        return texts
+    except Exception:
+        return None
+
+
 def extract_pdf(path: str, pages: str = None) -> dict:
     try:
         import pypdf
         reader = pypdf.PdfReader(path)
         total  = len(reader.pages)
         meta   = reader.metadata or {}
-
-        # 解析頁碼範圍
-        if pages:
-            parts = pages.split("-")
-            start = int(parts[0]) - 1
-            end   = int(parts[1]) if len(parts) > 1 else start + 1
-        else:
-            start, end = 0, total
-
-        texts = []
-        for i in range(max(0, start), min(end, total)):
-            txt = reader.pages[i].extract_text() or ""
-            texts.append({"page": i + 1, "text": txt.strip()})
-
-        return {
-            "type": "PDF",
-            "total_pages": total,
-            "extracted_pages": f"{start+1}-{min(end, total)}",
-            "metadata": {
-                "title":    meta.get("/Title", ""),
-                "author":   meta.get("/Author", ""),
-                "creator":  meta.get("/Creator", ""),
-                "created":  str(meta.get("/CreationDate", "")),
-                "modified": str(meta.get("/ModDate", "")),
-            },
-            "pages": texts,
-        }
     except ImportError:
         return {"error": "需要安裝 pypdf：pip install pypdf"}
     except Exception as e:
         return {"error": str(e)}
+
+    start, end = _parse_page_range(pages, total)
+
+    # 先嘗試 pypdf
+    texts, meta = _extract_pdf_pypdf(path, start, end)
+
+    # 若 pypdf 全部回傳空白，改用 pdfplumber（對中文 PDF 支援較佳）
+    if texts is not None and all(not t["text"] for t in texts):
+        plumber_texts = _extract_pdf_pdfplumber(path, start, end)
+        if plumber_texts:
+            texts = plumber_texts
+
+    # 若仍全空，可能為掃描型 PDF（影像），無法以文字方式提取
+    if texts is None:
+        texts = []
+    all_empty = all(not t["text"] for t in texts)
+
+    result = {
+        "type": "PDF",
+        "total_pages": total,
+        "extracted_pages": f"{start+1}-{min(end, total)}",
+        "metadata": {
+            "title":    meta.get("/Title", "") if meta else "",
+            "author":   meta.get("/Author", "") if meta else "",
+            "creator":  meta.get("/Creator", "") if meta else "",
+            "created":  str(meta.get("/CreationDate", "")) if meta else "",
+            "modified": str(meta.get("/ModDate", "")) if meta else "",
+        },
+        "pages": texts,
+    }
+    if all_empty:
+        result["warning"] = (
+            "此 PDF 未能提取到任何文字。"
+            "可能原因：1) 掃描型 PDF（影像，需 OCR）；"
+            "2) 字型嵌入方式不支援；3) 文件加密。"
+        )
+    return result
 
 
 # ── DOCX ──────────────────────────────────────────────────────────────────────

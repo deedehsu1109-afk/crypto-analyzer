@@ -50,7 +50,7 @@ def extract_text_from_file(path: str) -> str:
         return ""
     try:
         env = os.environ.copy()
-        env["PYTHONIOENCODING"] = "utf-8"   # 確保子程序 stdout 為 UTF-8
+        env["PYTHONIOENCODING"] = "utf-8"
         result = subprocess.run(
             [sys.executable, EXTRACT_SCRIPT, path, "--pretty"],
             capture_output=True, timeout=60,
@@ -58,22 +58,33 @@ def extract_text_from_file(path: str) -> str:
         )
         stdout = result.stdout.decode("utf-8", errors="replace")
         if result.returncode != 0:
+            stderr = result.stderr.decode("utf-8", errors="replace").strip()
             return ""
         data = json.loads(stdout)
-        # 依格式整合文字
+        # extract.py 回傳錯誤
+        if "error" in data:
+            return ""
+        # 整合文字（PDF 頁面 / DOCX 段落 / ODF content / XLSX 表格）
         parts = []
         for page in data.get("pages", []):
             parts.append(page.get("text", ""))
         for para in data.get("paragraphs", []):
             parts.append(para.get("text", ""))
+        # DOCX 表格
+        for tbl in data.get("tables", []):
+            for row in tbl.get("rows", []):
+                parts.append("  ".join(c for c in row if c))
         for block in data.get("content", []):
             parts.append(str(block))
         for sheet in data.get("sheets", []):
             for row in sheet.get("data", []):
                 parts.append("  ".join(str(c) for c in row if c))
-        return "\n".join(p for p in parts if p.strip())
+        text = "\n".join(p for p in parts if p.strip())
+        # 掃描型 PDF 警告：有 warning 且內文全空
+        if data.get("warning") and not text.strip():
+            return f"[提取警告] {data['warning']}"
+        return text
     except Exception:
-        # txt 直接讀
         if ext == ".txt":
             try:
                 with open(path, encoding="utf-8", errors="ignore") as f:
