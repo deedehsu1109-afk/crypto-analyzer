@@ -69,6 +69,80 @@ def _extract_pdf_pdfplumber(path: str, start: int, end: int):
         return None
 
 
+# Tesseract 可能的 Windows 安裝路徑
+_TESSERACT_WIN_PATHS = [
+    r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+    r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+]
+
+
+def _find_tesseract() -> str | None:
+    """回傳 tesseract 執行檔路徑，找不到回傳 None"""
+    import shutil
+    cmd = shutil.which("tesseract")
+    if cmd:
+        return cmd
+    for p in _TESSERACT_WIN_PATHS:
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def _ocr_pdf_pages(path: str, start: int, end: int) -> list | None:
+    """
+    掃描型 PDF OCR 提取。
+    pypdfium2 渲染頁面（2× 縮放）→ Tesseract（chi_tra+eng）。
+    回傳 texts 列表；Tesseract 未安裝時回傳 None。
+    """
+    tess_path = _find_tesseract()
+    if not tess_path:
+        return None
+
+    # 渲染 PDF 頁面為 PIL Image
+    try:
+        import pypdfium2 as pdfium
+        pdf_doc = pdfium.PdfDocument(path)
+        page_images = []
+        for i in range(start, min(end, len(pdf_doc))):
+            page   = pdf_doc[i]
+            bitmap = page.render(scale=2.0)   # 2× 提升 OCR 精度
+            pil_img = bitmap.to_pil()
+            page_images.append((i + 1, pil_img))
+        pdf_doc.close()
+    except Exception:
+        return None
+
+    if not page_images:
+        return []
+
+    # Tesseract OCR
+    try:
+        import pytesseract
+        pytesseract.pytesseract.tesseract_cmd = tess_path
+
+        # 偵測可用語言，優先用繁體中文
+        available = pytesseract.get_languages(config="")
+        if "chi_tra" in available:
+            lang = "chi_tra+eng"
+        elif "chi_sim" in available:
+            lang = "chi_sim+eng"
+        else:
+            lang = "eng"
+
+        texts = []
+        for page_num, img in page_images:
+            txt = pytesseract.image_to_string(
+                img, lang=lang, config="--psm 3 --oem 3")
+            texts.append({
+                "page":       page_num,
+                "text":       txt.strip(),
+                "ocr_engine": f"tesseract/{lang}",
+            })
+        return texts
+    except Exception:
+        return None
+
+
 def extract_pdf(path: str, pages: str = None) -> dict:
     try:
         import pypdf
@@ -82,39 +156,57 @@ def extract_pdf(path: str, pages: str = None) -> dict:
 
     start, end = _parse_page_range(pages, total)
 
-    # 先嘗試 pypdf
+    # 1. pypdf 提取
     texts, meta = _extract_pdf_pypdf(path, start, end)
 
-    # 若 pypdf 全部回傳空白，改用 pdfplumber（對中文 PDF 支援較佳）
+    # 2. 若全空，改用 pdfplumber（中文 PDF 支援較佳）
     if texts is not None and all(not t["text"] for t in texts):
         plumber_texts = _extract_pdf_pdfplumber(path, start, end)
-        if plumber_texts:
+        if plumber_texts and any(t["text"] for t in plumber_texts):
             texts = plumber_texts
 
-    # 若仍全空，可能為掃描型 PDF（影像），無法以文字方式提取
     if texts is None:
         texts = []
+
     all_empty = all(not t["text"] for t in texts)
+    ocr_used  = False
+    warning   = None
+
+    # 3. 若仍全空，嘗試 OCR（掃描型 PDF）
+    if all_empty:
+        ocr_texts = _ocr_pdf_pages(path, start, end)
+        if ocr_texts is not None:
+            # OCR 有執行（不論結果是否為空）
+            ocr_used = True
+            if any(t["text"] for t in ocr_texts):
+                texts = ocr_texts
+                all_empty = False
+            else:
+                warning = "OCR 完成但未識別出文字，請確認文件影像品質。"
+        else:
+            # Tesseract 未安裝
+            warning = (
+                "此為掃描型 PDF，需要 OCR 才能提取文字。\n"
+                "請安裝 Tesseract OCR（含繁體中文語言包 chi_tra）：\n"
+                "https://github.com/UB-Mannheim/tesseract/wiki"
+            )
 
     result = {
-        "type": "PDF",
-        "total_pages": total,
-        "extracted_pages": f"{start+1}-{min(end, total)}",
+        "type":             "PDF",
+        "total_pages":      total,
+        "extracted_pages":  f"{start+1}-{min(end, total)}",
+        "ocr_used":         ocr_used,
         "metadata": {
-            "title":    meta.get("/Title", "") if meta else "",
+            "title":    meta.get("/Title",  "") if meta else "",
             "author":   meta.get("/Author", "") if meta else "",
-            "creator":  meta.get("/Creator", "") if meta else "",
+            "creator":  meta.get("/Creator","") if meta else "",
             "created":  str(meta.get("/CreationDate", "")) if meta else "",
-            "modified": str(meta.get("/ModDate", "")) if meta else "",
+            "modified": str(meta.get("/ModDate",      "")) if meta else "",
         },
         "pages": texts,
     }
-    if all_empty:
-        result["warning"] = (
-            "此 PDF 未能提取到任何文字。"
-            "可能原因：1) 掃描型 PDF（影像，需 OCR）；"
-            "2) 字型嵌入方式不支援；3) 文件加密。"
-        )
+    if warning:
+        result["warning"] = warning
     return result
 
 

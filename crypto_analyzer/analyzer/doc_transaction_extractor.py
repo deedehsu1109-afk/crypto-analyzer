@@ -80,7 +80,10 @@ def extract_text_from_file(path: str) -> str:
             for row in sheet.get("data", []):
                 parts.append("  ".join(str(c) for c in row if c))
         text = "\n".join(p for p in parts if p.strip())
-        # 掃描型 PDF 警告：有 warning 且內文全空
+        # OCR 成功使用時加上標註
+        if data.get("ocr_used") and text.strip():
+            text = f"[OCR 識別結果]\n{text}"
+        # 有警告且內文全空（掃描型 PDF 或 OCR 失敗）
         if data.get("warning") and not text.strip():
             return f"[提取警告] {data['warning']}"
         return text
