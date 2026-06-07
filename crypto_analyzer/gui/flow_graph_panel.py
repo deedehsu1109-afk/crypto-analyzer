@@ -55,7 +55,7 @@ class FlowGraphPanel(ctk.CTkFrame):
         # matplotlib 物件
         self._fig: plt.Figure | None = None
         self._ax:  plt.Axes   | None = None
-        self._canvas: FigureCanvasTkAgg | None = None
+        self._mpl_canvas: FigureCanvasTkAgg | None = None
         self._pos: dict = {}        # networkx 佈局快取
         self._selected_node: str | None = None
 
@@ -118,10 +118,10 @@ class FlowGraphPanel(ctk.CTkFrame):
             self._ax.set_facecolor(BG_DARK)
             self._ax.text(0.5, 0.5, "尚無資料\n請查詢錢包後點擊「加入幣流圖」",
                           ha="center", va="center",
-                          fontsize=14, color="gray60",
+                          fontsize=14, color="#999999",
                           transform=self._ax.transAxes,
                           fontfamily="Microsoft JhengHei")
-            self._canvas.draw()
+            self._mpl_canvas.draw()
         self._update_stats()
 
     # ── UI 建構 ───────────────────────────────────────────────────────────────
@@ -202,13 +202,13 @@ class FlowGraphPanel(ctk.CTkFrame):
         self._ax.set_facecolor(BG_DARK)
         self._ax.axis("off")
 
-        self._canvas = FigureCanvasTkAgg(self._fig, master=frame)
-        self._canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+        self._mpl_canvas = FigureCanvasTkAgg(self._fig, master=frame)
+        self._mpl_canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
 
         # matplotlib 工具列（縮放/平移）
         toolbar_frame = tk.Frame(frame, bg=BG_DARK)
         toolbar_frame.grid(row=1, column=0, sticky="ew")
-        toolbar = NavigationToolbar2Tk(self._canvas, toolbar_frame)
+        toolbar = NavigationToolbar2Tk(self._mpl_canvas, toolbar_frame)
         toolbar.config(background=BG_DARK)
         for child in toolbar.winfo_children():
             try:
@@ -218,7 +218,7 @@ class FlowGraphPanel(ctk.CTkFrame):
         toolbar.update()
 
         # 點擊事件
-        self._canvas.mpl_connect("button_press_event", self._on_canvas_click)
+        self._mpl_canvas.mpl_connect("button_press_event", self._on_canvas_click)
 
         self.clear()
 
@@ -230,7 +230,7 @@ class FlowGraphPanel(ctk.CTkFrame):
         self._stat_lbl = ctk.CTkLabel(
             bar, text="節點：0　邊：0",
             font=("Microsoft JhengHei", 10),
-            text_color="gray60", anchor="w")
+            text_color="#999999", anchor="w")
         self._stat_lbl.grid(row=0, column=0, padx=12, pady=4, sticky="w")
 
         self._sel_lbl = ctk.CTkLabel(
@@ -259,7 +259,7 @@ class FlowGraphPanel(ctk.CTkFrame):
             self._draw_timeline()
 
         self._fig.tight_layout(pad=0.5)
-        self._canvas.draw()
+        self._mpl_canvas.draw()
         self._update_stats()
 
     def _draw_network(self):
@@ -316,7 +316,7 @@ class FlowGraphPanel(ctk.CTkFrame):
         if not edges:
             self._ax.text(0.5, 0.5, "無交易資料", ha="center", va="center",
                           transform=self._ax.transAxes,
-                          color="gray60", fontsize=14,
+                          color="#999999", fontsize=14,
                           fontfamily="Microsoft JhengHei")
             return
 
@@ -386,7 +386,7 @@ class FlowGraphPanel(ctk.CTkFrame):
             self._ax.text(0.5, 0.5, "無時間戳資料\n（BTC/TRX 部分交易無時間戳）",
                           ha="center", va="center",
                           transform=self._ax.transAxes,
-                          color="gray60", fontsize=13,
+                          color="#999999", fontsize=13,
                           fontfamily="Microsoft JhengHei")
             return
 
@@ -411,7 +411,7 @@ class FlowGraphPanel(ctk.CTkFrame):
             self._ax.text(0.5, 0.5, "無法解析時間格式",
                           ha="center", va="center",
                           transform=self._ax.transAxes,
-                          color="gray60", fontsize=13,
+                          color="#999999", fontsize=13,
                           fontfamily="Microsoft JhengHei")
             return
 
@@ -558,8 +558,8 @@ class FlowGraphPanel(ctk.CTkFrame):
                          command=lambda: self._copy_to_clipboard(address))
 
         try:
-            x = self.winfo_rootx() + self._canvas.get_tk_widget().winfo_x()
-            y = self.winfo_rooty() + self._canvas.get_tk_widget().winfo_y()
+            x = self.winfo_rootx() + self._mpl_canvas.get_tk_widget().winfo_x()
+            y = self.winfo_rooty() + self._mpl_canvas.get_tk_widget().winfo_y()
             menu.tk_popup(x + 200, y + 200)
         finally:
             menu.grab_release()
@@ -702,6 +702,8 @@ class FlowGraphPanel(ctk.CTkFrame):
                 text_color=WARN_COL)
 
     def _update_stats(self):
+        if not hasattr(self, "_stat_lbl"):
+            return
         if not self._state:
             self._stat_lbl.configure(text="節點：0　邊：0")
             return
