@@ -136,12 +136,24 @@ def init_db():
         );
 
         -- ── 索引 ──────────────────────────────────────────────────────────────
+        -- ── 幣流圖快照（證據模式用）────────────────────────────────────────────
+        CREATE TABLE IF NOT EXISTS graph_snapshots (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id     INTEGER REFERENCES cases(id) ON DELETE CASCADE,
+            chain       TEXT    NOT NULL,
+            label       TEXT,
+            nodes_json  TEXT    NOT NULL,   -- JSON: [{id, address, role, custom_label, ...}]
+            edges_json  TEXT    NOT NULL,   -- JSON: [{source, target, tx_hash, amount, ...}]
+            saved_at    TEXT    DEFAULT (datetime('now','localtime'))
+        );
+
         CREATE INDEX IF NOT EXISTS idx_txs_wallet    ON transactions(wallet_id);
         CREATE INDEX IF NOT EXISTS idx_txs_hash      ON transactions(tx_hash);
         CREATE INDEX IF NOT EXISTS idx_txs_addr      ON transactions(address);
         CREATE INDEX IF NOT EXISTS idx_approvals_wid ON approvals(wallet_id);
         CREATE INDEX IF NOT EXISTS idx_lookup_hash   ON tx_lookups(tx_hash);
         CREATE INDEX IF NOT EXISTS idx_victim_tx_case ON victim_transactions(case_id);
+        CREATE INDEX IF NOT EXISTS idx_graph_snap_case ON graph_snapshots(case_id);
         """)
         # 遷移：對舊資料庫補欄位（若尚未存在）
         _migrate(con)
@@ -603,3 +615,75 @@ def upsert_victim_transaction(case_id: int, data: dict) -> int:
 def delete_victim_transaction(tx_id: int):
     with _conn() as con:
         con.execute("DELETE FROM victim_transactions WHERE id=?", (tx_id,))
+
+
+# ── 幣流圖：邊資料接口 ────────────────────────────────────────────────────────
+
+def get_edges_for_graph(case_id: int = None, chain: str = None,
+                        address: str = None) -> list[dict]:
+    """
+    回傳適合 networkx 建邊的交易清單。
+    可依 case_id（案件所有錢包）、chain、單一 address 組合篩選。
+    每筆回傳：from_addr, to_addr, value_native, token_symbol, token_amount,
+              tx_time, tx_hash, tx_type, chain, wallet_id
+    """
+    conditions = ["t.is_error = 0", "t.from_addr != ''", "t.to_addr != ''"]
+    params: list = []
+
+    if case_id is not None:
+        conditions.append("w.case_id = ?")
+        params.append(case_id)
+    if chain:
+        conditions.append("t.chain = ?")
+        params.append(chain)
+    if address:
+        conditions.append("(t.from_addr = ? OR t.to_addr = ?)")
+        params.extend([address, address])
+
+    where = " AND ".join(conditions)
+    sql = f"""
+        SELECT t.from_addr, t.to_addr, t.value_native, t.token_symbol,
+               t.token_amount, t.tx_time, t.tx_hash, t.tx_type, t.chain,
+               t.wallet_id
+        FROM   transactions t
+        LEFT JOIN wallets w ON t.wallet_id = w.id
+        WHERE  {where}
+        ORDER BY t.tx_time ASC
+    """
+    with _conn() as con:
+        rows = con.execute(sql, params).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ── 幣流圖快照 CRUD ───────────────────────────────────────────────────────────
+
+def save_graph_snapshot(case_id: int, chain: str, nodes: list, edges: list,
+                        label: str = "") -> int:
+    with _conn() as con:
+        cur = con.execute("""
+            INSERT INTO graph_snapshots (case_id, chain, label, nodes_json, edges_json)
+            VALUES (?, ?, ?, ?, ?)
+        """, (case_id, chain, label,
+              json.dumps(nodes, ensure_ascii=False),
+              json.dumps(edges, ensure_ascii=False)))
+        return cur.lastrowid
+
+
+def get_graph_snapshots(case_id: int) -> list[dict]:
+    with _conn() as con:
+        rows = con.execute(
+            "SELECT * FROM graph_snapshots WHERE case_id=? ORDER BY saved_at DESC",
+            (case_id,)
+        ).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["nodes"] = json.loads(d.pop("nodes_json", "[]"))
+        d["edges"] = json.loads(d.pop("edges_json", "[]"))
+        result.append(d)
+    return result
+
+
+def delete_graph_snapshot(snapshot_id: int):
+    with _conn() as con:
+        con.execute("DELETE FROM graph_snapshots WHERE id=?", (snapshot_id,))

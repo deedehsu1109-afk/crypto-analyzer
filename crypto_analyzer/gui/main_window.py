@@ -17,6 +17,7 @@ from exporter.report import export_excel, export_csv
 from database import db as _db
 from gui.case_window import CaseDialog, LinkToCaseDialog
 from gui.victim_tx_panel import VictimTxPanel
+from gui.flow_graph_panel import FlowGraphPanel
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -101,12 +102,19 @@ class App(ctk.CTk):
             command=self._export_csv)
         self.export_csv_btn.grid(row=0, column=8, padx=2, pady=10)
 
+        self.flow_btn = ctk.CTkButton(
+            top, text="加入幣流圖", width=100,
+            font=("Microsoft JhengHei", 11),
+            fg_color="#4a2d6a",
+            command=self._add_to_flow_graph)
+        self.flow_btn.grid(row=0, column=9, padx=2, pady=10)
+
         self.settings_btn = ctk.CTkButton(
             top, text="⚙ 設定", width=70,
             font=("Microsoft JhengHei", 11),
             fg_color="gray35",
             command=self._open_settings)
-        self.settings_btn.grid(row=0, column=9, padx=(2, 12), pady=10)
+        self.settings_btn.grid(row=0, column=10, padx=(2, 12), pady=10)
 
         # ── 第二行：案件工具列（專案查詢模式下顯示）──
         self._case_bar = ctk.CTkFrame(top, corner_radius=6, fg_color="#1a2744")
@@ -219,13 +227,14 @@ class App(ctk.CTk):
         self.tabs = ctk.CTkTabview(self, corner_radius=10)
         self.tabs.grid(row=1, column=0, sticky="nsew", padx=12, pady=(4, 4))
         for name in ["錢包摘要", "授權對象", "原始交易", "Token 轉帳",
-                     "交易 Hash 分析", "查詢歷史", "案件管理"]:
+                     "幣流關聯圖", "交易 Hash 分析", "查詢歷史", "案件管理"]:
             self.tabs.add(name)
 
         self._build_summary_tab()
         self._build_approvals_tab()
         self._build_tx_tab("原始交易", "_tx_tree")
         self._build_tx_tab("Token 轉帳", "_token_tree")
+        self._build_flow_tab()
         self._build_hash_tab()
         self._build_history_tab()
         self._build_case_tab()
@@ -295,6 +304,15 @@ class App(ctk.CTk):
 
         cols = ("合約地址", "授權對象 (Spender)", "交易 Hash / 金額", "時間")
         self._approval_tree = self._make_treeview(frame, cols)
+
+    def _build_flow_tab(self):
+        tab = self.tabs.tab("幣流關聯圖")
+        tab.grid_columnconfigure(0, weight=1)
+        tab.grid_rowconfigure(0, weight=1)
+
+        self._flow_panel = FlowGraphPanel(tab)
+        self._flow_panel.grid(row=0, column=0, sticky="nsew")
+        self._flow_panel.set_node_click_callback(self._on_flow_node_clicked)
 
     def _build_hash_tab(self):
         tab = self.tabs.tab("交易 Hash 分析")
@@ -795,6 +813,7 @@ class App(ctk.CTk):
                      f"（{case['case_type']} · {case['status']}）"
             )
             self.status_var.set(f"已切換案件：{case['case_number']} {case['case_name']}")
+            self._flow_panel.set_case_id(case["id"])
         LinkToCaseDialog(self, title="選擇目前作業案件", on_select=on_select)
 
     def _new_case_quick(self):
@@ -806,12 +825,14 @@ class App(ctk.CTk):
             )
             self._reload_case_list()
             self.status_var.set(f"新建案件：{c['case_number']} {c['case_name']}")
+            self._flow_panel.set_case_id(c["id"])
         CaseDialog(self, on_save=on_save)
 
     def _clear_case(self):
         self._active_case = None
         self._case_label.configure(text="（尚未選擇案件）")
         self.status_var.set("已清除案件選擇")
+        self._flow_panel.set_case_id(None)
 
     def _build_tx_tab(self, tab_name: str, attr: str):
         tab = self.tabs.tab(tab_name)
@@ -1671,6 +1692,35 @@ class App(ctk.CTk):
                     v = str(v)[:80]
                 vals.append(v)
             new_tree.insert("", "end", values=vals)
+
+    # ── 幣流圖 ────────────────────────────────────────────────────────────────
+
+    def _add_to_flow_graph(self):
+        """將目前查詢結果加入幣流關聯圖。"""
+        if not self._profile:
+            messagebox.showinfo("尚無資料", "請先執行分析。")
+            return
+        panel: FlowGraphPanel = self._flow_panel
+        if panel._state is None:
+            panel.load_from_profile(self._profile)
+        else:
+            panel.add_profile_to_graph(self._profile)
+        # 同步更新案件 ID 與生成模式
+        if self._query_mode.get() == "專案查詢" and self._active_case:
+            panel.set_case_id(self._active_case["id"])
+            panel._gen_mode.set("evidence")
+        else:
+            panel._gen_mode.set("explore")
+        panel._update_mode_label()
+        self.tabs.set("幣流關聯圖")
+
+    def _on_flow_node_clicked(self, address: str, chain: str):
+        """幣流圖節點點擊 → 填入地址欄並執行查詢。"""
+        self.addr_entry.delete(0, "end")
+        self.addr_entry.insert(0, address)
+        self.chain_var.set(chain)
+        self.tabs.set("錢包摘要")
+        self._start_smart_query()
 
     # ── 匯出 ──────────────────────────────────────────────────────────────────
 

@@ -1,0 +1,220 @@
+{
+  "_comment": "已知交易所、混幣器、跨鏈橋地址登錄表。來源：公開鏈上資料與各交易所公告。",
+  "_version": "1.0.0",
+  "_updated": "2026-06-07",
+
+  "exchanges": {
+    "Binance": {
+      "color": "#1E90FF",
+      "label": "Binance",
+      "risk": "low",
+      "eth": [
+        "0x28c6c06298d514db089934071355e5743bf21d60",
+        "0x21a31ee1afc51d94c2efccaa2092ad1028285549",
+        "0xdfd5293d8e347dfe59e90efd55b2956a1343963d",
+        "0x56eddb7aa87536c09ccc2793473599fd21a8b17f",
+        "0x9696f59e4d72e237be84ffd425dcad154bf96976",
+        "0x4e9ce36e442e55ecd9025b9a6e0d88485d628a67",
+        "0x8894e0a0c962cb723c1976a4421c95949be2d4e3",
+        "0xe0f0cfde7ee664943906f17f7f14342e76a5cec7",
+        "0xbe0eb53f46cd790cd13851d5ef9d811f4d55ac2f"
+      ],
+      "trx": [
+        "TJDENsfBJs4RFETt1X1W8wMDc8M5XnJhCe",
+        "TNXoiAJ3dct8Fjg4M9fkLFh9S2v9TXc32G",
+        "TKVkSyBfDh9BRjTgxzHXMdS5bNe6T3jqkK"
+      ],
+      "btc": [
+        "1NDyJtNTjmwk5xPNhjgAMu4HDHigtobu1s",
+        "34xp4vRoCGJym3xR7yCVPFHoCNxv4Twseo",
+        "3LYJfcfHPXYJreMsASk2jkn69LWEYKzexb"
+      ]
+    },
+    "OKX": {
+      "color": "#1E90FF",
+      "label": "OKX",
+      "risk": "low",
+      "eth": [
+        "0x6cc5f688a315f3dc28a7781717a9a798a59fda7b",
+        "0x236f9f97e0e62388479bf9e5ba4889e46b0273c3",
+        "0xa7efae728d2936e78bda97dc267687568dd593f3"
+      ],
+      "trx": [
+        "TKzxdSv2FZKQrEqkKVgp5DcwEXBEKMg2Ax",
+        "TV6MuMXfmLbBqPZvBHdwFsDnQeVfnmiuSi"
+      ],
+      "btc": [
+        "1HQ3Go3ggs8pFnXuHVHRytPCq5fGG8Hbhx"
+      ]
+    },
+    "Kraken": {
+      "color": "#1E90FF",
+      "label": "Kraken",
+      "risk": "low",
+      "eth": [
+        "0x2910543af39aba0cd09dbb2d50200b3e800a63d2",
+        "0x0a869d79a7052c7f1b55a8ebabbea3420f0d1e13",
+        "0xe853c56864a2ebe4576a807d26fdc4a0ada51919",
+        "0x267be1c1d684f78cb4f6a176c4911b741e4ffdc0"
+      ],
+      "trx": [],
+      "btc": [
+        "1J3J6EvPrv8q6AC3VCjWV45Uf3nssNMRtH"
+      ]
+    },
+    "Coinbase": {
+      "color": "#1E90FF",
+      "label": "Coinbase",
+      "risk": "low",
+      "eth": [
+        "0xa090e606e30bd747d4e6245a1517ebe430f0057e",
+        "0x71660c4005ba85c37ccec55d0c4493e66fe775d3",
+        "0x503828976d22510aad0201ac7ec88293211d23da",
+        "0xddfabcdc4d8ffc6d5beaf154f18b778f892a0740",
+        "0x3cd751e6b0078be393132286c442345e5dc49699",
+        "0xb5d85cbf7cb3ee0d56b3bb207d5fc4b82f43f511"
+      ],
+      "trx": [],
+      "btc": [
+        "3BZZG57F4u2CQXuV1sZuoFSjNvvF2bCTmd"
+      ]
+    },
+    "Huobi": {
+      "color": "#1E90FF",
+      "label": "Huobi/HTX",
+      "risk": "low",
+      "eth": [
+        "0xab5c66752a9e8167967685f1450532fb96d5d24f",
+        "0x6748f50f686bfbca6fe8ad62b22228b87f31ff2b",
+        "0xfdb16996831753d5331ff813c29a93c76834a0ad",
+        "0x0057371196e1a89e38a5de6c4e3a87aa40e1bac7"
+      ],
+      "trx": [
+        "TQrY9WAcGCa6A9mVeQaVQvGMz8jnY9mXUZ"
+      ],
+      "btc": []
+    },
+    "Gate.io": {
+      "color": "#1E90FF",
+      "label": "Gate.io",
+      "risk": "low",
+      "eth": [
+        "0x0d0707963952f2fba59dd06f2b425ace40b492fe",
+        "0x7793cd85c11a924478d358d49b05b37e91b5810f"
+      ],
+      "trx": [
+        "TGfbHFGMmVZBa6K6MuVBrfLaFd2C7EZHE2"
+      ],
+      "btc": []
+    },
+    "KuCoin": {
+      "color": "#1E90FF",
+      "label": "KuCoin",
+      "risk": "low",
+      "eth": [
+        "0xd6216fc19db775df9774a6e33526131da7d19a2c",
+        "0x738cf6903e6c4e699d1c2dd9ab8b67f5401e2cf4"
+      ],
+      "trx": [
+        "TVjsyZ7fYF3qLF6BQgPmTEZy1xrNNyVAAA"
+      ],
+      "btc": []
+    },
+    "MaiCoin": {
+      "color": "#1E90FF",
+      "label": "MaiCoin（台灣）",
+      "risk": "low",
+      "eth": [],
+      "trx": [],
+      "btc": []
+    },
+    "BitoPro": {
+      "color": "#1E90FF",
+      "label": "BitoPro（台灣）",
+      "risk": "low",
+      "eth": [],
+      "trx": [],
+      "btc": []
+    },
+    "MAX": {
+      "color": "#1E90FF",
+      "label": "MAX（台灣）",
+      "risk": "low",
+      "eth": [],
+      "trx": [],
+      "btc": []
+    }
+  },
+
+  "mixers": {
+    "TornadoCash": {
+      "color": "#9B59B6",
+      "label": "Tornado Cash（混幣器）",
+      "risk": "high",
+      "eth": [
+        "0x910cbd523d972eb0a6f4cae4618ad62622b39dbf",
+        "0xa160cdab225685da1d56aa342ad8841c3b53f291",
+        "0xd4b88df4d29f5cedd6857912842cff3b20c8cfa3",
+        "0xfd8610d20aa15b7b2e3be39b396a1bc3516c7144",
+        "0x22aaa7720ddd5388a3c0a3333430953c68f1849b",
+        "0xba214c1c1928a32bffe790263e38b4af9bfcd659",
+        "0xb20c66c4de72433f3ce747b58b86830c459ca911",
+        "0x527653ea119f3e6a1f5bd18fbf9aeeeefb8d9caf",
+        "0x58e8dcc13be9780fc42e8723d8ead4cf46943df2",
+        "0xd691f27f38b395864ea86cfc7253969b409c362d",
+        "0xaf4c0b70b2ea9fb7487c7cbb37ada259579fe040",
+        "0xa60c772958a3ed426c63a3bc0a2ca9b4b4d1f540",
+        "0x9ad122c22b14202b4490edaf288fdb3c7cb3ff5e",
+        "0xb541fc07bc7619fd4062a54d96268525cbc6ffef",
+        "0x12d66f87a04a9e220c9d05072f51fea6c08ef2b5",
+        "0x47ce0c6ed5b0ce3d3a51fdb1c52dc66a7c3c2936",
+        "0x910cbd523d972eb0a6f4cae4618ad62622b39dbf"
+      ],
+      "trx": [],
+      "btc": []
+    },
+    "ChipMixer": {
+      "color": "#9B59B6",
+      "label": "ChipMixer（混幣器，已下架）",
+      "risk": "high",
+      "eth": [],
+      "trx": [],
+      "btc": []
+    }
+  },
+
+  "bridges": {
+    "Across": {
+      "color": "#E67E22",
+      "label": "Across Protocol（跨鏈橋）",
+      "risk": "medium",
+      "eth": [
+        "0x5c7bcd6e7de5423a257d81b4959428b42f97eed7",
+        "0x08c84b1ac9f1b4fd56b6bfd1d87e07e6e65b0cca"
+      ],
+      "trx": [],
+      "btc": []
+    },
+    "LayerZero": {
+      "color": "#E67E22",
+      "label": "LayerZero（跨鏈橋）",
+      "risk": "medium",
+      "eth": [
+        "0x66a71dcef29a0ffbdbe3c6a460a3b5bc225cd675"
+      ],
+      "trx": [],
+      "btc": []
+    },
+    "Stargate": {
+      "color": "#E67E22",
+      "label": "Stargate Finance（跨鏈橋）",
+      "risk": "medium",
+      "eth": [
+        "0x8731d54e9d02c286767d56ac03e8037c07e01e98",
+        "0x150f94b44927f078737562f0fcf3c95c01cc2376"
+      ],
+      "trx": [],
+      "btc": []
+    }
+  }
+}
