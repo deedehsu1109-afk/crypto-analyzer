@@ -1424,7 +1424,7 @@ class App(ctk.CTk):
                 e_ts = tf["end_ts"]   if tf and tf["mode"] == "range" else None
                 txs      = api.get_transactions(address, start_ts=s_ts, end_ts=e_ts)
                 self._set_status("正在抓取 TRC-20 轉帳...")
-                trc20    = api.get_trc20_transfers(address)
+                trc20    = api.get_trc20_transfers(address, start_ts=s_ts, end_ts=e_ts)
                 self._set_status("正在分析授權紀錄...")
                 approvals = api.get_token_approvals(txs, address)
                 profile  = profile_trx(address, txs, trc20, approvals)
@@ -1574,10 +1574,10 @@ class App(ctk.CTk):
                 f"{p.get('total_fee_eth', 0):,.8f} ETH",
                 p.get("top_fee_dest", "N/A"),
             ]
-        else:
-            out_val   = f"{p.get(amt_key, 0):,.8f} {unit}"
-            in_val    = f"{p.get(in_key,  0):,.8f} {unit}"
-            fee_val   = f"{p.get(fee_key, 0):,.8f} {unit}"
+        elif chain == "TRX":
+            out_val   = f"{p.get(amt_key, 0):,.6f} TRX"
+            in_val    = f"{p.get(in_key,  0):,.6f} TRX"
+            fee_val   = f"{p.get(fee_key, 0):,.6f} TRX"
             trc20_out = p.get("trc20_out_by_token", {})
             trc20_in  = p.get("trc20_in_by_token",  {})
             values = [
@@ -1586,10 +1586,30 @@ class App(ctk.CTk):
                 p.get("first_tx_time", "N/A"),
                 p.get("last_tx_time",  "N/A"),
                 p.get("first_source",  "N/A"),
-                str(p.get("out_count", 0)), "—", "—",
+                str(p.get("out_count", 0)),
+                str(p.get("trx_out_count", 0)),
+                str(p.get("trc20_out_count", 0)),
                 out_val, _fmt_token_dict(trc20_out),
-                str(p.get("in_count", 0)), "—", "—",
+                str(p.get("in_count", 0)),
+                str(p.get("trx_in_count", 0)),
+                str(p.get("trc20_in_count", 0)),
                 in_val, _fmt_token_dict(trc20_in),
+                fee_val, p.get("top_fee_dest", "N/A"),
+            ]
+        else:
+            out_val   = f"{p.get(amt_key, 0):,.8f} {unit}"
+            in_val    = f"{p.get(in_key,  0):,.8f} {unit}"
+            fee_val   = f"{p.get(fee_key, 0):,.8f} {unit}"
+            values = [
+                chain,
+                p.get("address", ""),
+                p.get("first_tx_time", "N/A"),
+                p.get("last_tx_time",  "N/A"),
+                p.get("first_source",  "N/A"),
+                str(p.get("out_count", 0)), "—", "—",
+                out_val, "—",
+                str(p.get("in_count", 0)), "—", "—",
+                in_val, "—",
                 fee_val, p.get("top_fee_dest", "N/A"),
             ]
 

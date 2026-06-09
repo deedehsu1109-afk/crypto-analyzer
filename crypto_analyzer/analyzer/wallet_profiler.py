@@ -152,15 +152,34 @@ def profile_trx(address: str, txs: list[dict], trc20_txs: list[dict],
     out_txs = [t for t in txs if t.get("ownerAddress", "") == addr]
     in_txs  = [t for t in txs if t.get("toAddress",    "") == addr]
 
-    out_count = len(out_txs)
-    in_count  = len(in_txs)
-
     def _trx_amount(t: dict) -> float:
         amount = t.get("amount", 0) or t.get("contractData", {}).get("amount", 0)
         return _sun_to_trx(amount)
 
     out_total = sum(_trx_amount(t) for t in out_txs)
     in_total  = sum(_trx_amount(t) for t in in_txs)
+
+    # ── TRC-20 Token 交易 ──
+    trc20_out = [t for t in trc20_txs if t.get("from_address", "") == addr]
+    trc20_in  = [t for t in trc20_txs if t.get("to_address",   "") == addr]
+
+    def _trc20_amount(t: dict) -> float:
+        try:
+            decimals = int(t.get("tokenDecimal", 6) or 6)
+            return int(t.get("amount", 0)) / (10 ** decimals)
+        except (ValueError, TypeError):
+            return 0.0
+
+    trc20_out_by_token: dict[str, float] = defaultdict(float)
+    trc20_in_by_token:  dict[str, float] = defaultdict(float)
+    for t in trc20_out:
+        trc20_out_by_token[t.get("tokenAbbr", "?")] += _trc20_amount(t)
+    for t in trc20_in:
+        trc20_in_by_token[t.get("tokenAbbr", "?")] += _trc20_amount(t)
+
+    # 合計（原生 TRX + TRC-20 筆數）
+    out_count = len(out_txs) + len(trc20_out)
+    in_count  = len(in_txs)  + len(trc20_in)
 
     # 手續費
     fee_by_addr: dict[str, float] = defaultdict(float)
@@ -171,13 +190,19 @@ def profile_trx(address: str, txs: list[dict], trc20_txs: list[dict],
         fee_by_addr[t.get("toAddress", "unknown")] += fee
     top_fee_dest = max(fee_by_addr, key=fee_by_addr.get) if fee_by_addr else "N/A"
 
-    # 首次來源（按時間排序）
+    # 首次來源（原生 TRX 優先，否則查 TRC-20）
     sorted_in = sorted(in_txs, key=lambda t: t.get("timestamp", 0))
     first_source = sorted_in[0].get("ownerAddress", "N/A") if sorted_in else "N/A"
+    if first_source == "N/A" and trc20_in:
+        sorted_trc20_in = sorted(trc20_in, key=lambda t: t.get("block_ts", 0))
+        first_source = sorted_trc20_in[0].get("from_address", "N/A") + "（首筆 TRC-20 入帳）"
 
+    # 時間戳（原生 TRX 單位 ms；TRC-20 block_ts 也是 ms）
     timestamps = [t.get("timestamp", 0) // 1000 for t in txs if t.get("timestamp")]
-    first_ts = min(timestamps) if timestamps else None
-    last_ts  = max(timestamps) if timestamps else None
+    trc20_ts   = [t.get("block_ts", 0)   // 1000 for t in trc20_txs if t.get("block_ts")]
+    all_ts = timestamps + trc20_ts
+    first_ts = min(all_ts) if all_ts else None
+    last_ts  = max(all_ts) if all_ts else None
 
     approval_targets = []
     for a in approvals:
@@ -190,10 +215,19 @@ def profile_trx(address: str, txs: list[dict], trc20_txs: list[dict],
     return {
         "chain": "TRX",
         "address": address,
-        "out_count": out_count,
+        # 原生 TRX
+        "trx_out_count": len(out_txs),
+        "trx_in_count":  len(in_txs),
         "out_total_trx": round(out_total, 6),
-        "in_count": in_count,
-        "in_total_trx": round(in_total, 6),
+        "in_total_trx":  round(in_total,  6),
+        # TRC-20 Token
+        "trc20_out_count":    len(trc20_out),
+        "trc20_in_count":     len(trc20_in),
+        "trc20_out_by_token": dict(trc20_out_by_token),
+        "trc20_in_by_token":  dict(trc20_in_by_token),
+        # 合計（TRX + TRC-20 筆數）
+        "out_count": out_count,
+        "in_count":  in_count,
         "total_fee_trx": round(total_fee, 6),
         "top_fee_dest": top_fee_dest,
         "first_source": first_source,

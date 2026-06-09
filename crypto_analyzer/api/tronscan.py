@@ -58,16 +58,23 @@ class TronScanAPI:
             time.sleep(0.3)
         return results[:limit]
 
-    def get_trc20_transfers(self, address: str, limit: int = 10000) -> list[dict]:
+    def get_trc20_transfers(self, address: str, limit: int = 10000,
+                            start_ts: int = None, end_ts: int = None) -> list[dict]:
         results = []
         start = 0
         page_size = 50
+        params_base: dict = {
+            "relatedAddress": address,
+            "limit": page_size,
+            "sort": "-block_ts",
+        }
+        if start_ts:
+            params_base["start_timestamp"] = start_ts * 1000
+        if end_ts:
+            params_base["end_timestamp"] = end_ts * 1000
+
         while len(results) < limit:
-            data = self._get("token_trc20/transfers", {
-                "relatedAddress": address,
-                "start": start,
-                "limit": page_size,
-            })
+            data = self._get("token_trc20/transfers", {**params_base, "start": start})
             txs = data.get("token_transfers", [])
             if not txs:
                 break
