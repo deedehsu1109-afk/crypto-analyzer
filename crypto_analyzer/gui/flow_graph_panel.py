@@ -12,7 +12,7 @@ import matplotlib.patches as mpatches
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 import networkx as nx
 
-from analyzer.flow_builder import GraphState, ROLE_STYLES, NodeInfo
+from analyzer.flow_builder import GraphState, ROLE_STYLES, NodeInfo, EdgeInfo
 
 # ── 顏色常數（深色主題配色）────────────────────────────────────────────────────
 
@@ -28,6 +28,7 @@ WARN_COL  = "#f5a623"
 VIEW_NETWORK  = "地址關係圖"
 VIEW_FLOW     = "幣流流水圖"
 VIEW_TIMELINE = "時序泳道圖"
+VIEW_MALTEGO  = "司法金流圖"
 
 
 class FlowGraphPanel(ctk.CTkFrame):
@@ -150,10 +151,10 @@ class FlowGraphPanel(ctk.CTkFrame):
                      font=("Microsoft JhengHei", 11),
                      text_color=TEXT_COL).grid(row=0, column=1, padx=(0, 4), pady=8)
         view_seg = ctk.CTkSegmentedButton(
-            bar, values=[VIEW_NETWORK, VIEW_FLOW, VIEW_TIMELINE],
+            bar, values=[VIEW_NETWORK, VIEW_FLOW, VIEW_TIMELINE, VIEW_MALTEGO],
             variable=self._view_mode,
             font=("Microsoft JhengHei", 11),
-            width=300,
+            width=410,
             command=self._on_view_change)
         view_seg.grid(row=0, column=2, padx=4, pady=8)
 
@@ -189,7 +190,25 @@ class FlowGraphPanel(ctk.CTkFrame):
         ctk.CTkButton(bar, text="清除圖", width=70,
                       font=("Microsoft JhengHei", 11),
                       fg_color="gray30",
-                      command=self.clear).grid(row=0, column=9, padx=(4, 12), pady=8)
+                      command=self.clear).grid(row=0, column=9, padx=(4, 4), pady=8)
+
+        ctk.CTkLabel(bar, text="│", text_color="gray40",
+                     font=("Arial", 16)).grid(row=0, column=10, padx=2)
+
+        ctk.CTkButton(bar, text="＋ 節點", width=72,
+                      font=("Microsoft JhengHei", 11),
+                      fg_color="#1e3a5f",
+                      command=self._add_node_manual_dialog).grid(row=0, column=11, padx=2, pady=8)
+
+        ctk.CTkButton(bar, text="＋ 交易", width=72,
+                      font=("Microsoft JhengHei", 11),
+                      fg_color="#3a1e5f",
+                      command=self._add_edge_manual_dialog).grid(row=0, column=12, padx=2, pady=8)
+
+        ctk.CTkButton(bar, text="↑ CSV", width=65,
+                      font=("Microsoft JhengHei", 11),
+                      fg_color="#1e3a2a",
+                      command=self._import_csv_dialog).grid(row=0, column=13, padx=(2, 12), pady=8)
 
     def _build_canvas_area(self):
         frame = ctk.CTkFrame(self, fg_color=BG_DARK, corner_radius=0)
@@ -255,6 +274,8 @@ class FlowGraphPanel(ctk.CTkFrame):
             self._draw_network()
         elif mode == VIEW_FLOW:
             self._draw_flow()
+        elif mode == VIEW_MALTEGO:
+            self._draw_maltego()
         else:
             self._draw_timeline()
 
@@ -721,3 +742,446 @@ class FlowGraphPanel(ctk.CTkFrame):
     def set_case_id(self, case_id: int | None):
         """由主視窗在切換案件時傳入；None 代表清除。"""
         self._current_case_id = case_id
+
+    # ── 司法金流圖（Maltego 風格）────────────────────────────────────────────
+
+    def _maltego_layout(self, G: nx.DiGraph) -> dict:
+        """BFS 階層式佈局：種子節點在最左，依跳數向右排列。"""
+        if not G.nodes:
+            return {}
+
+        seeds   = [n for n in G.nodes if G.nodes[n].get("role") == "seed"]
+        no_pred = [n for n in G.nodes if G.in_degree(n) == 0 and n not in seeds]
+        roots   = seeds + no_pred or list(G.nodes)[:1]
+
+        layer_of: dict[str, int] = {}
+        queue = list(roots)
+        for r in roots:
+            layer_of[r] = 0
+
+        while queue:
+            node = queue.pop(0)
+            for nbr in G.successors(node):
+                if nbr not in layer_of:
+                    layer_of[nbr] = layer_of[node] + 1
+                    queue.append(nbr)
+
+        max_l = max(layer_of.values(), default=0)
+        for n in G.nodes:
+            if n not in layer_of:
+                layer_of[n] = max_l + 1
+
+        by_layer: dict[int, list] = {}
+        for n, l in layer_of.items():
+            by_layer.setdefault(l, []).append(n)
+
+        n_layers = len(by_layer)
+        pos: dict[str, tuple] = {}
+        for l, nodes in sorted(by_layer.items()):
+            x = l / max(n_layers - 1, 1) if n_layers > 1 else 0.5
+            n = len(nodes)
+            for i, node in enumerate(nodes):
+                y = (i + 1) / (n + 1)
+                pos[node] = (x, y)
+        return pos
+
+    @staticmethod
+    def _fmt_ts(ts: str) -> str:
+        """將 Unix 毫秒/秒或 ISO 字串統一格式化為 YYYY-MM-DD HH:MM:SS。"""
+        if not ts:
+            return ""
+        import datetime
+        try:
+            v = int(ts)
+            dt = datetime.datetime.fromtimestamp(v / 1000 if v > 1e10 else v)
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+        except (ValueError, TypeError, OSError):
+            pass
+        return ts[:19] if len(ts) > 19 else ts
+
+    def _draw_maltego(self):
+        """司法金流圖：Maltego 風格階層式佈局，每筆交易獨立顯示時間與金額。"""
+        ax = self._ax
+
+        if not self._state or not self._state.nodes:
+            ax.text(0.5, 0.5,
+                    "尚無資料\n\n請使用「＋ 節點」手動建立，\n或查詢錢包後點擊「加入幣流圖」，\n或使用「↑ CSV」批次匯入。",
+                    ha="center", va="center",
+                    fontsize=12, color="#888888",
+                    transform=ax.transAxes,
+                    fontfamily="Microsoft JhengHei",
+                    linespacing=1.8)
+            return
+
+        self._state.rebuild_graph()
+        G = self._state.G
+
+        if not self._pos or set(self._pos) != set(G.nodes):
+            self._pos = self._maltego_layout(G)
+        pos = self._pos
+
+        ax.set_xlim(-0.20, 1.20)
+        ax.set_ylim(-0.12, 1.12)
+        ax.axis("off")
+
+        # ── 繪製交易邊 ────────────────────────────────────────────────────────
+        pair_count: dict[tuple, int] = {}
+        for e in self._state.edges:
+            key = (e.source, e.target)
+            pair_count[key] = pair_count.get(key, 0) + 1
+
+        pair_idx: dict[tuple, int] = {}
+        edges_sorted = sorted(self._state.edges, key=lambda e: e.tx_time or "")
+
+        for e in edges_sorted:
+            sp = pos.get(e.source)
+            tp = pos.get(e.target)
+            if sp is None or tp is None:
+                continue
+
+            key   = (e.source, e.target)
+            total = pair_count[key]
+            idx   = pair_idx.get(key, 0)
+            pair_idx[key] = idx + 1
+
+            # 多邊時展開弧度
+            rad = 0.12 + (idx - total / 2) * 0.10
+
+            src_color = self._state.nodes.get(
+                e.source, NodeInfo(e.source, "ETH")).color
+
+            ax.annotate("", xy=tp, xytext=sp,
+                        arrowprops=dict(arrowstyle="->",
+                                        color=src_color, lw=1.5,
+                                        connectionstyle=f"arc3,rad={rad:.2f}"),
+                        zorder=2)
+
+            # 邊標籤：時間 + 金額
+            mid_x = (sp[0] + tp[0]) / 2
+            mid_y = (sp[1] + tp[1]) / 2 + rad * 0.28
+            ts    = self._fmt_ts(e.tx_time)
+            label = f"{ts}\n{e.amount_display}" if ts else e.amount_display
+
+            ax.text(mid_x, mid_y, label,
+                    ha="center", va="center", fontsize=5.2,
+                    color="#dddddd",
+                    fontfamily="Microsoft JhengHei",
+                    zorder=3,
+                    bbox=dict(facecolor="#0d0d1a", edgecolor="none",
+                              alpha=0.78, pad=1.8,
+                              boxstyle="round,pad=0.25"))
+
+        # ── 繪製節點方塊 ──────────────────────────────────────────────────────
+        n_nodes = max(len(pos), 1)
+        box_w   = max(0.08, min(0.13, 0.65 / n_nodes))
+        box_h   = 0.052
+
+        for node, (x, y) in pos.items():
+            info  = self._state.nodes.get(node, NodeInfo(node, "ETH"))
+            color = info.color
+
+            rect = mpatches.FancyBboxPatch(
+                (x - box_w / 2, y - box_h / 2), box_w, box_h,
+                boxstyle="round,pad=0.006",
+                facecolor=color, alpha=0.20,
+                edgecolor=color, linewidth=1.8, zorder=4)
+            ax.add_patch(rect)
+
+            # 標籤（機構名 / 自訂標籤）
+            ax.text(x, y + 0.010, info.display_label,
+                    ha="center", va="center", fontsize=6.5,
+                    color="white", fontweight="bold",
+                    fontfamily="Microsoft JhengHei", zorder=5)
+
+            # 地址縮寫
+            short = (node[:6] + "…" + node[-4:]) if len(node) > 10 else node
+            ax.text(x, y - 0.017, short,
+                    ha="center", va="center", fontsize=4.8,
+                    color="#aaaaaa", fontfamily="Consolas", zorder=5)
+
+        self._draw_legend()
+
+    # ── 手動建立金流圖 ────────────────────────────────────────────────────────
+
+    def _add_node_manual_dialog(self):
+        """手動新增節點（錢包地址）對話框。"""
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("新增節點")
+        dlg.geometry("460x320")
+        dlg.resizable(False, False)
+        dlg.configure(fg_color=BG_PANEL)
+        dlg.transient(self.winfo_toplevel())
+        dlg.lift()
+        dlg.focus_force()
+        dlg.after(100, dlg.grab_set)
+
+        ctk.CTkLabel(dlg, text="新增錢包節點",
+                     font=("Microsoft JhengHei", 14, "bold"),
+                     text_color=ACCENT).pack(pady=(18, 8))
+
+        def efield(label, hint="", mono=False):
+            f = ctk.CTkFrame(dlg, fg_color="transparent")
+            f.pack(fill="x", padx=22, pady=5)
+            ctk.CTkLabel(f, text=label, width=72, anchor="e",
+                         font=("Microsoft JhengHei", 11),
+                         text_color=TEXT_COL).pack(side="left")
+            e = ctk.CTkEntry(f,
+                             font=("Consolas" if mono else "Microsoft JhengHei", 11),
+                             width=300, placeholder_text=hint)
+            e.pack(side="left", padx=(8, 0))
+            return e
+
+        e_addr  = efield("地址 *", "TRX / ETH / BTC 地址", mono=True)
+        e_label = efield("標籤",   "e.g. Imtoken、被害人A")
+
+        # Role + Chain
+        rc = ctk.CTkFrame(dlg, fg_color="transparent")
+        rc.pack(fill="x", padx=22, pady=5)
+        ctk.CTkLabel(rc, text="角色", width=72, anchor="e",
+                     font=("Microsoft JhengHei", 11),
+                     text_color=TEXT_COL).pack(side="left")
+        role_var = ctk.StringVar(value="unknown")
+        ctk.CTkComboBox(rc, values=list(ROLE_STYLES.keys()), variable=role_var,
+                        font=("Microsoft JhengHei", 11), width=150).pack(side="left", padx=(8, 16))
+        ctk.CTkLabel(rc, text="鏈", font=("Microsoft JhengHei", 11),
+                     text_color=TEXT_COL).pack(side="left")
+        chain_var = ctk.StringVar(value=self._state.chain if self._state else "TRX")
+        ctk.CTkComboBox(rc, values=["TRX", "ETH", "BTC"], variable=chain_var,
+                        font=("Microsoft JhengHei", 11), width=100).pack(side="left", padx=(8, 0))
+
+        def confirm():
+            addr = e_addr.get().strip()
+            if not addr:
+                messagebox.showwarning("缺少資料", "地址不可空白。", parent=dlg)
+                return
+            if self._state is None:
+                self._state = GraphState(chain=chain_var.get(), mode="explore")
+                self._gen_mode.set("explore")
+                self._update_mode_label()
+            node = self._state.add_node(addr, role=role_var.get(),
+                                        custom_label=e_label.get().strip())
+            self._pos = {}
+            self._view_mode.set(VIEW_MALTEGO)
+            self._render()
+            dlg.destroy()
+
+        bf = ctk.CTkFrame(dlg, fg_color="transparent")
+        bf.pack(pady=18)
+        ctk.CTkButton(bf, text="新增節點", width=110, command=confirm,
+                      font=("Microsoft JhengHei", 11),
+                      fg_color="#2d6a4f").pack(side="left", padx=8)
+        ctk.CTkButton(bf, text="取消", width=90, command=dlg.destroy,
+                      font=("Microsoft JhengHei", 11),
+                      fg_color="gray30").pack(side="left", padx=8)
+
+    def _add_edge_manual_dialog(self):
+        """手動新增交易紀錄（金流邊）對話框。"""
+        if self._state is None:
+            self._state = GraphState(chain="TRX", mode="explore")
+            self._gen_mode.set("explore")
+            self._update_mode_label()
+
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("新增交易紀錄")
+        dlg.geometry("500x460")
+        dlg.resizable(False, False)
+        dlg.configure(fg_color=BG_PANEL)
+        dlg.transient(self.winfo_toplevel())
+        dlg.lift()
+        dlg.focus_force()
+        dlg.after(100, dlg.grab_set)
+
+        ctk.CTkLabel(dlg, text="新增交易紀錄（金流邊）",
+                     font=("Microsoft JhengHei", 14, "bold"),
+                     text_color=ACCENT).pack(pady=(18, 8))
+
+        existing = list(self._state.nodes.keys())
+        addr_opts = [
+            f"{self._state.nodes[a].display_label}  {a[:8]}…"
+            for a in existing
+        ] + existing
+
+        label_to_addr = {}
+        for a in existing:
+            label_to_addr[f"{self._state.nodes[a].display_label}  {a[:8]}…"] = a
+
+        def resolve(val):
+            return label_to_addr.get(val.strip(), val.strip())
+
+        def cbox(parent, label, hint=""):
+            f = ctk.CTkFrame(parent, fg_color="transparent")
+            f.pack(fill="x", padx=22, pady=5)
+            ctk.CTkLabel(f, text=label, width=90, anchor="e",
+                         font=("Microsoft JhengHei", 11),
+                         text_color=TEXT_COL).pack(side="left")
+            var = ctk.StringVar()
+            box = ctk.CTkComboBox(f, values=addr_opts or [], variable=var,
+                                  font=("Consolas", 10), width=330,
+                                  placeholder_text=hint)
+            box.pack(side="left", padx=(8, 0))
+            return var
+
+        def efield(parent, label, default="", hint="", mono=False):
+            f = ctk.CTkFrame(parent, fg_color="transparent")
+            f.pack(fill="x", padx=22, pady=5)
+            ctk.CTkLabel(f, text=label, width=90, anchor="e",
+                         font=("Microsoft JhengHei", 11),
+                         text_color=TEXT_COL).pack(side="left")
+            e = ctk.CTkEntry(f,
+                             font=("Consolas" if mono else "Microsoft JhengHei", 11),
+                             width=330, placeholder_text=hint)
+            if default:
+                e.insert(0, default)
+            e.pack(side="left", padx=(8, 0))
+            return e
+
+        from_var = cbox(dlg, "FROM *",   "發送方地址或從下拉選取")
+        to_var   = cbox(dlg, "TO *",     "接收方地址或從下拉選取")
+        e_time   = efield(dlg, "時間",   "2025-03-27 19:48:00", "YYYY-MM-DD HH:MM:SS")
+        e_amt    = efield(dlg, "金額 *", hint="例如 30311")
+
+        cf = ctk.CTkFrame(dlg, fg_color="transparent")
+        cf.pack(fill="x", padx=22, pady=5)
+        ctk.CTkLabel(cf, text="幣種", width=90, anchor="e",
+                     font=("Microsoft JhengHei", 11),
+                     text_color=TEXT_COL).pack(side="left")
+        cur_var = ctk.StringVar(value="USDT")
+        ctk.CTkComboBox(cf, values=["USDT", "TRX", "ETH", "BTC", "USDC"],
+                        variable=cur_var,
+                        font=("Microsoft JhengHei", 11), width=130).pack(side="left", padx=(8, 0))
+
+        e_hash = efield(dlg, "TX Hash", hint="（選填）", mono=True)
+
+        def confirm():
+            from_addr = resolve(from_var.get())
+            to_addr   = resolve(to_var.get())
+            if not from_addr or not to_addr:
+                messagebox.showwarning("缺少資料", "FROM 和 TO 不可空白。", parent=dlg)
+                return
+            try:
+                amount = float(e_amt.get().replace(",", "") or "0")
+            except ValueError:
+                messagebox.showwarning("格式錯誤", "金額請輸入數字。", parent=dlg)
+                return
+
+            currency = cur_var.get()
+            is_token = currency in ("USDT", "USDC", "BUSD")
+
+            self._state.add_node(from_addr)
+            self._state.add_node(to_addr)
+            self._state.edges.append(EdgeInfo(
+                source=from_addr, target=to_addr,
+                tx_hash=e_hash.get().strip(),
+                value_native=0.0 if is_token else amount,
+                token_symbol=currency if is_token else "",
+                token_amount=amount if is_token else 0.0,
+                tx_time=e_time.get().strip(),
+                tx_type="trc20" if is_token else "normal",
+            ))
+            self._pos = {}
+            self._view_mode.set(VIEW_MALTEGO)
+            self._render()
+            dlg.destroy()
+
+        bf = ctk.CTkFrame(dlg, fg_color="transparent")
+        bf.pack(pady=16)
+        ctk.CTkButton(bf, text="新增交易", width=110, command=confirm,
+                      font=("Microsoft JhengHei", 11),
+                      fg_color="#2d4a6a").pack(side="left", padx=8)
+        ctk.CTkButton(bf, text="取消", width=90, command=dlg.destroy,
+                      font=("Microsoft JhengHei", 11),
+                      fg_color="gray30").pack(side="left", padx=8)
+
+    def _import_csv_dialog(self):
+        """從 CSV 批次匯入金流資料。
+
+        支援欄位（彈性欄名）：
+          必填: from_addr / from / source, to_addr / to / target, amount / 金額
+          選填: datetime / timestamp / time / 時間,
+                currency / symbol / 幣種,
+                tx_hash / hash / txid,
+                from_label / from_name, to_label / to_name,
+                from_role, to_role
+        """
+        import csv as _csv
+
+        path = filedialog.askopenfilename(
+            parent=self,
+            title="選擇 CSV 金流資料",
+            filetypes=[("CSV 檔案", "*.csv"), ("文字檔案", "*.txt"),
+                       ("所有檔案", "*.*")])
+        if not path:
+            return
+
+        try:
+            with open(path, encoding="utf-8-sig", newline="") as f:
+                reader = _csv.DictReader(f)
+                rows   = list(reader)
+        except Exception as exc:
+            messagebox.showerror("讀取失敗", str(exc), parent=self)
+            return
+
+        if not rows:
+            messagebox.showinfo("提示", "CSV 沒有資料列。", parent=self)
+            return
+
+        def pick(row: dict, *keys) -> str:
+            for k in keys:
+                for rk in row:
+                    if rk.strip().lower() == k.lower():
+                        return (row[rk] or "").strip()
+            return ""
+
+        if self._state is None:
+            self._state = GraphState(chain="TRX", mode="explore")
+            self._gen_mode.set("explore")
+            self._update_mode_label()
+
+        imported, skipped = 0, []
+
+        for i, row in enumerate(rows, 1):
+            from_addr  = pick(row, "from_addr", "from", "from_address", "發送方", "source")
+            to_addr    = pick(row, "to_addr",   "to",   "to_address",   "接收方", "target")
+            amt_str    = pick(row, "amount", "金額", "value", "數量")
+            currency   = pick(row, "currency", "symbol", "幣種", "token") or "USDT"
+            tx_time    = pick(row, "datetime", "timestamp", "tx_time", "time", "時間", "date")
+            tx_hash    = pick(row, "tx_hash", "hash", "txhash", "txid")
+            from_label = pick(row, "from_label", "from_name", "發送方標籤")
+            to_label   = pick(row, "to_label",   "to_name",   "接收方標籤")
+            from_role  = pick(row, "from_role") or "unknown"
+            to_role    = pick(row, "to_role")   or "unknown"
+
+            if not from_addr or not to_addr:
+                skipped.append(f"第 {i} 列：缺少地址")
+                continue
+            try:
+                amount = float(amt_str.replace(",", "") or "0")
+            except ValueError:
+                skipped.append(f"第 {i} 列：金額格式錯誤 ({amt_str!r})")
+                continue
+
+            self._state.add_node(from_addr, role=from_role, custom_label=from_label)
+            self._state.add_node(to_addr,   role=to_role,   custom_label=to_label)
+
+            is_token = currency.upper() in ("USDT", "USDC", "BUSD", "USDE", "DAI")
+            self._state.edges.append(EdgeInfo(
+                source=from_addr, target=to_addr,
+                tx_hash=tx_hash,
+                value_native=0.0 if is_token else amount,
+                token_symbol=currency.upper() if is_token else "",
+                token_amount=amount if is_token else 0.0,
+                tx_time=self._fmt_ts(tx_time) or tx_time,
+                tx_type="trc20" if is_token else "normal",
+            ))
+            imported += 1
+
+        self._pos = {}
+        self._view_mode.set(VIEW_MALTEGO)
+        self._render()
+
+        msg = f"成功匯入 {imported} 筆交易，共 {len(self._state.nodes)} 個節點。"
+        if skipped:
+            msg += f"\n\n略過 {len(skipped)} 筆：\n" + "\n".join(skipped[:5])
+            if len(skipped) > 5:
+                msg += f"\n…（共 {len(skipped)} 筆錯誤）"
+        messagebox.showinfo("匯入完成", msg, parent=self)

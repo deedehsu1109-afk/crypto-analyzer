@@ -154,6 +154,22 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_lookup_hash   ON tx_lookups(tx_hash);
         CREATE INDEX IF NOT EXISTS idx_victim_tx_case ON victim_transactions(case_id);
         CREATE INDEX IF NOT EXISTS idx_graph_snap_case ON graph_snapshots(case_id);
+
+        -- ── 涉案錢包地址 / 金融帳戶 ─────────────────────────────────────────────
+        CREATE TABLE IF NOT EXISTS case_addresses (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id           INTEGER REFERENCES cases(id) ON DELETE CASCADE,
+            addr_type         TEXT    DEFAULT '加密錢包',  -- '加密錢包' / '金融帳戶'
+            chain_institution TEXT,   -- TRX / ETH / BTC 或 銀行名稱（如 玉山銀行808）
+            address           TEXT    NOT NULL,           -- 錢包地址或帳號
+            holder_role       TEXT    DEFAULT '不明',     -- 被害人 / 嫌疑人 / 中間人 / 不明
+            label             TEXT,                       -- 標記說明（如「被害人OKX帳戶」）
+            source_doc        TEXT,                       -- 來源文件
+            notes             TEXT,
+            created_at        TEXT    DEFAULT (datetime('now','localtime')),
+            updated_at        TEXT    DEFAULT (datetime('now','localtime'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_case_addr_case ON case_addresses(case_id);
         """)
         # 遷移：對舊資料庫補欄位（若尚未存在）
         _migrate(con)
@@ -615,6 +631,45 @@ def upsert_victim_transaction(case_id: int, data: dict) -> int:
 def delete_victim_transaction(tx_id: int):
     with _conn() as con:
         con.execute("DELETE FROM victim_transactions WHERE id=?", (tx_id,))
+
+
+# ── 涉案錢包地址 / 金融帳戶 CRUD ──────────────────────────────────────────────
+
+def get_case_addresses(case_id: int) -> list[dict]:
+    with _conn() as con:
+        rows = con.execute(
+            "SELECT * FROM case_addresses WHERE case_id=? "
+            "ORDER BY addr_type, holder_role, id",
+            (case_id,)
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def upsert_case_address(case_id: int, data: dict) -> int:
+    """新增或更新一筆涉案地址/帳戶。含 id 則更新，否則新增。"""
+    row_id = data.get("id")
+    fields = ["addr_type", "chain_institution", "address",
+              "holder_role", "label", "source_doc", "notes"]
+    if row_id:
+        sets = ", ".join(f"{f}=?" for f in fields)
+        sets += ", updated_at=datetime('now','localtime')"
+        vals = [data.get(f) for f in fields] + [row_id]
+        with _conn() as con:
+            con.execute(f"UPDATE case_addresses SET {sets} WHERE id=?", vals)
+        return row_id
+    else:
+        cols = ", ".join(["case_id"] + fields)
+        qs   = ", ".join(["?"] * (len(fields) + 1))
+        vals = [case_id] + [data.get(f) for f in fields]
+        with _conn() as con:
+            cur = con.execute(
+                f"INSERT INTO case_addresses ({cols}) VALUES ({qs})", vals)
+            return cur.lastrowid
+
+
+def delete_case_address(addr_id: int):
+    with _conn() as con:
+        con.execute("DELETE FROM case_addresses WHERE id=?", (addr_id,))
 
 
 # ── 幣流圖：邊資料接口 ────────────────────────────────────────────────────────

@@ -19,6 +19,7 @@ class CaseDialog(ctk.CTkToplevel):
         self.case      = case          # None = 新建，dict = 編輯
         self.on_save   = on_save
         self._case_id  = case["id"] if case else None  # 已存入 DB 的案件 ID
+        self._pending_addrs: list[dict] = []             # 案件尚未儲存時暫存的提取地址
         self.title("編輯案件" if case else "新建案件")
         self.geometry("960x680")
         self.resizable(True, True)
@@ -60,12 +61,12 @@ class CaseDialog(ctk.CTkToplevel):
         # ── 分頁內容 ──
         self._tabs = ctk.CTkTabview(self, corner_radius=10)
         self._tabs.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 4))
-        for name in ["案件基本資料", "被害人陳述交易紀錄"]:
+        for name in ["案件基本資料", "涉案錢包 / 帳戶"]:
             self._tabs.add(name)
         self._tabs.set("案件基本資料")
 
         self._build_basic_tab()
-        self._build_victim_tx_tab()
+        self._build_address_tab()
 
         # ── 底部按鈕 ──
         btn_f = ctk.CTkFrame(self, fg_color="transparent")
@@ -156,10 +157,10 @@ class CaseDialog(ctk.CTkToplevel):
         self._notes_t.grid(row=6, column=0, columnspan=2,
                            sticky="nsew", padx=8, pady=(0, 8))
 
-    # ── 分頁二：被害人陳述交易紀錄 ────────────────────────────────────────────
+    # ── 分頁二：涉案錢包 / 帳戶 ──────────────────────────────────────────────
 
-    def _build_victim_tx_tab(self):
-        tab = self._tabs.tab("被害人陳述交易紀錄")
+    def _build_address_tab(self):
+        tab = self._tabs.tab("涉案錢包 / 帳戶")
         tab.grid_columnconfigure(0, weight=1)
         tab.grid_rowconfigure(1, weight=1)
 
@@ -169,32 +170,31 @@ class CaseDialog(ctk.CTkToplevel):
         hint.grid_columnconfigure(0, weight=1)
         self._tx_hint_lbl = ctk.CTkLabel(
             hint,
-            text="請先在「案件基本資料」分頁填寫案件名稱並點「儲存案件」，即可新增交易記錄。",
+            text="請先在「案件基本資料」分頁填寫案件名稱並點「儲存案件」，即可新增涉案地址/帳戶。",
             font=("Microsoft JhengHei", 11), text_color="#f5a623")
         self._tx_hint_lbl.grid(row=0, column=0, padx=12, pady=8, sticky="w")
 
-        # 交易記錄面板容器（儲存後才填入）
+        # 面板容器（儲存後才填入）
         self._victim_panel_container = ctk.CTkFrame(tab, corner_radius=8)
         self._victim_panel_container.grid(row=1, column=0,
                                            sticky="nsew", padx=4, pady=(0, 4))
         self._victim_panel_container.grid_columnconfigure(0, weight=1)
         self._victim_panel_container.grid_rowconfigure(0, weight=1)
-        self._victim_tx_panel = None
+        self._victim_tx_panel = None   # 保留屬性名稱供其他方法使用
 
-        # 若編輯已存案件，直接建立面板
         if self._case_id:
             self._init_victim_panel()
 
     def _init_victim_panel(self):
-        """初始化被害人交易記錄面板（需有 case_id）"""
-        from gui.victim_tx_panel import VictimTxPanel
+        """初始化涉案地址/帳戶面板（需有 case_id）"""
+        from gui.case_address_panel import CaseAddressPanel
         for w in self._victim_panel_container.winfo_children():
             w.destroy()
-        self._victim_tx_panel = VictimTxPanel(
+        self._victim_tx_panel = CaseAddressPanel(
             self._victim_panel_container, self._case_id)
         self._victim_tx_panel.grid(row=0, column=0, sticky="nsew")
         self._tx_hint_lbl.configure(
-            text=f"案件 ID：{self._case_id}　可在此新增、編輯、匯入被害人陳述之交易記錄。",
+            text=f"案件 ID：{self._case_id}　可新增、編輯、從文件提取涉案錢包地址或金融帳戶。",
             text_color="#aaffaa")
 
     # ── 匯入案件編號 ──────────────────────────────────────────────────────────
@@ -270,28 +270,68 @@ class CaseDialog(ctk.CTkToplevel):
         # 同步更新資料庫
         if self._case_id:
             _db.update_case(self._case_id, description=new_desc)
-        # 若提取到交易記錄，匯入被害人交易表
-        if result.get("transactions") and self._case_id:
+
+        addrs = result.get("addresses", [])
+        proc  = len(result["processed_files"])
+        err   = len(result["error_files"])
+
+        if not addrs:
+            messagebox.showinfo(
+                "文件分析完成",
+                f"已處理 {proc} 份文件（{err} 份失敗），摘要已填入案件描述。\n"
+                "未從文件中提取到錢包地址或金融帳號。",
+                parent=self)
+            return
+
+        # ── 有提取到地址/帳戶 ──
+        if self._case_id:
             imported = 0
-            for t in result["transactions"]:
-                _db.upsert_victim_transaction(self._case_id, t)
+            for a in addrs:
+                _db.upsert_case_address(self._case_id, a)
                 imported += 1
             if self._victim_tx_panel:
                 self._victim_tx_panel._load()
-            proc = len(result["processed_files"])
-            err  = len(result["error_files"])
+            else:
+                self._init_victim_panel()
+            self._tabs.set("涉案錢包 / 帳戶")
             messagebox.showinfo(
                 "文件匯入完成",
                 f"已處理 {proc} 份文件（{err} 份失敗）\n"
                 f"摘要已填入「案件描述」\n"
-                f"交易記錄匯入 {imported} 筆（請至「被害人陳述交易紀錄」分頁確認）",
+                f"提取 {imported} 筆涉案地址/帳戶，目前顯示於「涉案錢包 / 帳戶」分頁。",
                 parent=self)
         else:
-            proc = len(result["processed_files"])
-            messagebox.showinfo(
-                "文件分析完成",
-                f"已處理 {proc} 份文件，摘要已填入案件描述。",
-                parent=self)
+            if self._auto_save():
+                imported = 0
+                for a in addrs:
+                    _db.upsert_case_address(self._case_id, a)
+                    imported += 1
+                self._init_victim_panel()
+                self._tabs.set("涉案錢包 / 帳戶")
+                messagebox.showinfo(
+                    "文件匯入完成",
+                    f"已處理 {proc} 份文件（{err} 份失敗）\n"
+                    f"案件已自動儲存\n"
+                    f"提取 {imported} 筆涉案地址/帳戶，目前顯示於「涉案錢包 / 帳戶」分頁。",
+                    parent=self)
+            else:
+                self._pending_addrs = addrs
+                self._update_pending_hint()
+                messagebox.showinfo(
+                    "文件分析完成（暫存）",
+                    f"已處理 {proc} 份文件（{err} 份失敗）\n"
+                    f"摘要已填入「案件描述」\n"
+                    f"提取到 {len(addrs)} 筆涉案地址/帳戶。\n\n"
+                    "⚠ 案件尚未儲存（請填寫案件名稱）\n"
+                    "儲存案件後地址/帳戶將自動匯入。",
+                    parent=self)
+
+    def _update_pending_hint(self):
+        """在涉案錢包/帳戶分頁提示列顯示暫存數量"""
+        if self._pending_addrs:
+            self._tx_hint_lbl.configure(
+                text=f"⚠ 有 {len(self._pending_addrs)} 筆來自文件分析的地址/帳戶待匯入，請先儲存案件。",
+                text_color="#f5a623")
 
     # ── 填入既有資料 ──────────────────────────────────────────────────────────
 
@@ -364,10 +404,23 @@ class CaseDialog(ctk.CTkToplevel):
             # 初始化被害人交易面板（若尚未建立）
             if self._victim_tx_panel is None:
                 self._init_victim_panel()
+            # 補匯入暫存的文件分析地址/帳戶
+            pending_msg = ""
+            if self._pending_addrs:
+                imported = 0
+                for a in self._pending_addrs:
+                    _db.upsert_case_address(self._case_id, a)
+                    imported += 1
+                self._pending_addrs = []
+                self._victim_tx_panel._load()
+                pending_msg = f"\n已自動匯入 {imported} 筆文件分析地址/帳戶。"
             messagebox.showinfo("已儲存",
-                                f"案件【{data['case_number']}】已儲存。\n"
-                                "可繼續在「被害人陳述交易紀錄」分頁新增記錄。",
+                                f"案件【{data['case_number']}】已儲存。"
+                                f"{pending_msg}\n"
+                                "可繼續在「涉案錢包 / 帳戶」分頁新增記錄。",
                                 parent=self)
+            if pending_msg:
+                self._tabs.set("涉案錢包 / 帳戶")
         except Exception as e:
             messagebox.showerror("儲存失敗", str(e), parent=self)
             return
