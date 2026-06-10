@@ -4,6 +4,8 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import customtkinter as ctk
 from database import db as _db
+from gui.case_bank_tx_panel import CaseBankTxPanel
+from gui.case_chain_tx_panel import CaseChainTxPanel
 
 _CASE_TYPES    = ["一般", "詐欺", "洗錢", "資恐", "勒索軟體", "非法交易所", "其他"]
 _CASE_STATUSES = ["進行中", "已結案", "暫停", "移送"]
@@ -61,12 +63,14 @@ class CaseDialog(ctk.CTkToplevel):
         # ── 分頁內容 ──
         self._tabs = ctk.CTkTabview(self, corner_radius=10)
         self._tabs.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 4))
-        for name in ["案件基本資料", "涉案錢包 / 帳戶"]:
+        for name in ["案件基本資料", "涉案錢包 / 帳戶", "一般帳戶交易", "區塊鏈交易"]:
             self._tabs.add(name)
         self._tabs.set("案件基本資料")
 
         self._build_basic_tab()
         self._build_address_tab()
+        self._build_bank_tx_tab()
+        self._build_chain_tx_tab()
 
         # ── 底部按鈕 ──
         btn_f = ctk.CTkFrame(self, fg_color="transparent")
@@ -84,8 +88,8 @@ class CaseDialog(ctk.CTkToplevel):
     def _build_basic_tab(self):
         tab = self._tabs.tab("案件基本資料")
         tab.grid_columnconfigure(1, weight=1)
-        tab.grid_rowconfigure(6, weight=1)  # description
-        tab.grid_rowconfigure(7, weight=0)
+        tab.grid_rowconfigure(5, weight=2)  # 筆錄內容（較大）
+        tab.grid_rowconfigure(7, weight=1)  # 案件摘要
 
         def lbl(text, row, required=False):
             color = "#ff9999" if required else None
@@ -132,30 +136,53 @@ class CaseDialog(ctk.CTkToplevel):
                                    placeholder_text="承辦人姓名")
         self._inv_e.grid(row=3, column=1, sticky="ew", padx=(4, 8), pady=5)
 
-        # 案件描述（多行 + 匯入按鈕）
-        lbl("案件描述：", 5)
-        desc_ctrl = ctk.CTkFrame(tab, fg_color="transparent")
-        desc_ctrl.grid(row=4, column=1, sticky="w", padx=(4, 8), pady=(4, 0))
-        ctk.CTkButton(desc_ctrl, text="📄 從文件匯入摘要", width=160,
+        # ── 筆錄內容 ──────────────────────────────────────────────────────────
+        trans_hdr = ctk.CTkFrame(tab, fg_color="transparent")
+        trans_hdr.grid(row=4, column=0, columnspan=2,
+                       sticky="ew", padx=8, pady=(10, 2))
+        ctk.CTkLabel(trans_hdr, text="筆錄內容：",
+                     font=("Microsoft JhengHei", 12, "bold"),
+                     text_color="#e2e8f0").pack(side="left")
+        ctk.CTkButton(trans_hdr, text="📄 匯入筆錄內容", width=150,
                       font=("Microsoft JhengHei", 10),
                       fg_color="#4a3a7a",
-                      command=self._import_folder_to_desc).pack(side="left")
-        ctk.CTkLabel(desc_ctrl,
-                     text="（可多選 PDF/DOCX/XLSX/ODT 文件，自動摘要）",
+                      command=self._import_transcript).pack(side="left", padx=10)
+        ctk.CTkLabel(trans_hdr,
+                     text="（可多選 PDF / DOCX / TXT，匯入完整筆錄原文）",
+                     font=("Microsoft JhengHei", 9),
+                     text_color="gray60").pack(side="left")
+
+        self._transcript_t = ctk.CTkTextbox(tab, font=("Microsoft JhengHei", 11),
+                                             height=160)
+        self._transcript_t.grid(row=5, column=0, columnspan=2,
+                                 sticky="nsew", padx=8, pady=(0, 4))
+
+        # ── 案件摘要 ──────────────────────────────────────────────────────────
+        desc_hdr = ctk.CTkFrame(tab, fg_color="transparent")
+        desc_hdr.grid(row=6, column=0, columnspan=2,
+                      sticky="ew", padx=8, pady=(10, 2))
+        ctk.CTkLabel(desc_hdr, text="案件摘要：",
+                     font=("Microsoft JhengHei", 12, "bold"),
+                     text_color="#e2e8f0").pack(side="left")
+        ctk.CTkLabel(desc_hdr,
+                     text="（使用者自行記錄案情摘要，此欄位為「說明」之顯示來源）",
                      font=("Microsoft JhengHei", 9),
                      text_color="gray60").pack(side="left", padx=6)
 
         self._desc_t = ctk.CTkTextbox(tab, font=("Microsoft JhengHei", 11),
-                                       height=130)
-        self._desc_t.grid(row=5, column=0, columnspan=2,
+                                       height=100)
+        self._desc_t.grid(row=7, column=0, columnspan=2,
                           sticky="nsew", padx=8, pady=(0, 4))
 
-        # 備註
-        lbl("備註：", 6)
+        # ── 備註 ──────────────────────────────────────────────────────────────
+        ctk.CTkLabel(tab, text="備註：",
+                     font=("Microsoft JhengHei", 12, "bold"),
+                     text_color="#e2e8f0", anchor="w").grid(
+            row=8, column=0, columnspan=2, padx=8, pady=(10, 2), sticky="w")
         self._notes_t = ctk.CTkTextbox(tab, font=("Microsoft JhengHei", 11),
-                                        height=70)
-        self._notes_t.grid(row=6, column=0, columnspan=2,
-                           sticky="nsew", padx=8, pady=(0, 8))
+                                        height=60)
+        self._notes_t.grid(row=9, column=0, columnspan=2,
+                           sticky="ew", padx=8, pady=(0, 8))
 
     # ── 分頁二：涉案錢包 / 帳戶 ──────────────────────────────────────────────
 
@@ -197,6 +224,72 @@ class CaseDialog(ctk.CTkToplevel):
             text=f"案件 ID：{self._case_id}　可新增、編輯、從文件提取涉案錢包地址或金融帳戶。",
             text_color="#aaffaa")
 
+    # ── 分頁三：一般帳戶交易 ──────────────────────────────────────────────────
+
+    def _build_bank_tx_tab(self):
+        tab = self._tabs.tab("一般帳戶交易")
+        tab.grid_columnconfigure(0, weight=1)
+        tab.grid_rowconfigure(1, weight=1)
+
+        self._bank_hint_lbl = ctk.CTkLabel(
+            tab,
+            text="請先在「案件基本資料」填寫案件名稱並點「儲存案件」，即可新增一般帳戶交易記錄。",
+            font=("Microsoft JhengHei", 11), text_color="#f5a623")
+        self._bank_hint_lbl.grid(row=0, column=0, padx=12, pady=(8, 2), sticky="w")
+
+        self._bank_panel_container = ctk.CTkFrame(tab, corner_radius=8)
+        self._bank_panel_container.grid(row=1, column=0,
+                                        sticky="nsew", padx=4, pady=(0, 4))
+        self._bank_panel_container.grid_columnconfigure(0, weight=1)
+        self._bank_panel_container.grid_rowconfigure(0, weight=1)
+        self._bank_tx_panel: CaseBankTxPanel | None = None
+
+        if self._case_id:
+            self._init_bank_tx_panel()
+
+    def _init_bank_tx_panel(self):
+        for w in self._bank_panel_container.winfo_children():
+            w.destroy()
+        self._bank_tx_panel = CaseBankTxPanel(
+            self._bank_panel_container, self._case_id)
+        self._bank_tx_panel.grid(row=0, column=0, sticky="nsew")
+        self._bank_hint_lbl.configure(
+            text=f"案件 ID：{self._case_id}　記錄一般金融帳戶交易（銀行轉帳、ATM 等）。",
+            text_color="#aaffaa")
+
+    # ── 分頁四：區塊鏈交易 ───────────────────────────────────────────────────
+
+    def _build_chain_tx_tab(self):
+        tab = self._tabs.tab("區塊鏈交易")
+        tab.grid_columnconfigure(0, weight=1)
+        tab.grid_rowconfigure(1, weight=1)
+
+        self._chain_hint_lbl = ctk.CTkLabel(
+            tab,
+            text="請先在「案件基本資料」填寫案件名稱並點「儲存案件」，即可新增區塊鏈交易記錄。",
+            font=("Microsoft JhengHei", 11), text_color="#f5a623")
+        self._chain_hint_lbl.grid(row=0, column=0, padx=12, pady=(8, 2), sticky="w")
+
+        self._chain_panel_container = ctk.CTkFrame(tab, corner_radius=8)
+        self._chain_panel_container.grid(row=1, column=0,
+                                         sticky="nsew", padx=4, pady=(0, 4))
+        self._chain_panel_container.grid_columnconfigure(0, weight=1)
+        self._chain_panel_container.grid_rowconfigure(0, weight=1)
+        self._chain_tx_panel: CaseChainTxPanel | None = None
+
+        if self._case_id:
+            self._init_chain_tx_panel()
+
+    def _init_chain_tx_panel(self):
+        for w in self._chain_panel_container.winfo_children():
+            w.destroy()
+        self._chain_tx_panel = CaseChainTxPanel(
+            self._chain_panel_container, self._case_id)
+        self._chain_tx_panel.grid(row=0, column=0, sticky="nsew")
+        self._chain_hint_lbl.configure(
+            text=f"案件 ID：{self._case_id}　記錄區塊鏈交易（TRX / ETH / BTC 等）。",
+            text_color="#aaffaa")
+
     # ── 匯入案件編號 ──────────────────────────────────────────────────────────
 
     def _import_by_number(self):
@@ -221,14 +314,16 @@ class CaseDialog(ctk.CTkToplevel):
         self.case     = found
         self._fill(found)
         self._init_victim_panel()
+        self._init_bank_tx_panel()
+        self._init_chain_tx_panel()
         self._import_entry.delete(0, "end")
         self.title(f"編輯案件：{found['case_number']}")
 
-    # ── 從資料夾匯入摘要 ──────────────────────────────────────────────────────
+    # ── 匯入筆錄內容 ─────────────────────────────────────────────────────────
 
-    def _import_folder_to_desc(self):
+    def _import_transcript(self):
         paths = filedialog.askopenfilenames(
-            title="選擇案件文件（可多選）",
+            title="選擇筆錄文件（可多選）",
             filetypes=[
                 ("支援文件", "*.pdf *.docx *.doc *.xlsx *.odt *.txt"),
                 ("PDF", "*.pdf"),
@@ -242,34 +337,29 @@ class CaseDialog(ctk.CTkToplevel):
         if not paths:
             return
 
-        self._desc_t.insert("end", "\n\n【分析中，請稍候…】")
+        self._transcript_t.insert("end", "\n\n【匯入中，請稍候…】")
         self.update_idletasks()
-
-        # 在主執行緒先取得目前描述內容（Tkinter 不允許從背景執行緒存取 widget）
-        cur_desc_snapshot = self._desc_t.get("1.0", "end").strip()
+        cur_snapshot = self._transcript_t.get("1.0", "end").strip()
 
         def do_import():
             try:
-                from analyzer.doc_transaction_extractor import (
-                    analyze_files, summarize_for_case)
-                result  = analyze_files(list(paths))
-                summary = summarize_for_case(result["raw_text"])
-                cur_desc = cur_desc_snapshot.replace("【分析中，請稍候…】", "").strip()
-                new_desc = ((cur_desc + "\n\n") if cur_desc else "") + \
-                           "【文件分析摘要】\n" + summary
-                self.after(0, self._fill_desc, new_desc, result)
+                from analyzer.doc_transaction_extractor import analyze_files
+                result   = analyze_files(list(paths))
+                raw_text = result.get("raw_text", "")
+                self.after(0, self._fill_transcript, raw_text, cur_snapshot, result)
             except Exception as e:
                 self.after(0, lambda err=e: messagebox.showerror(
-                    "分析失敗", f"文件分析時發生錯誤：\n{err}", parent=self))
+                    "匯入失敗", f"文件匯入時發生錯誤：\n{err}", parent=self))
 
         threading.Thread(target=do_import, daemon=True).start()
 
-    def _fill_desc(self, new_desc: str, result: dict):
-        self._desc_t.delete("1.0", "end")
-        self._desc_t.insert("1.0", new_desc)
-        # 同步更新資料庫
+    def _fill_transcript(self, raw_text: str, prev_snapshot: str, result: dict):
+        prev = prev_snapshot.replace("【匯入中，請稍候…】", "").strip()
+        new_text = ((prev + "\n\n") if prev else "") + raw_text
+        self._transcript_t.delete("1.0", "end")
+        self._transcript_t.insert("1.0", new_text)
         if self._case_id:
-            _db.update_case(self._case_id, description=new_desc)
+            _db.update_case(self._case_id, transcript=new_text)
 
         addrs = result.get("addresses", [])
         proc  = len(result["processed_files"])
@@ -277,8 +367,8 @@ class CaseDialog(ctk.CTkToplevel):
 
         if not addrs:
             messagebox.showinfo(
-                "文件分析完成",
-                f"已處理 {proc} 份文件（{err} 份失敗），摘要已填入案件描述。\n"
+                "筆錄匯入完成",
+                f"已處理 {proc} 份文件（{err} 份失敗），筆錄原文已匯入。\n"
                 "未從文件中提取到錢包地址或金融帳號。",
                 parent=self)
             return
@@ -295,10 +385,10 @@ class CaseDialog(ctk.CTkToplevel):
                 self._init_victim_panel()
             self._tabs.set("涉案錢包 / 帳戶")
             messagebox.showinfo(
-                "文件匯入完成",
+                "筆錄匯入完成",
                 f"已處理 {proc} 份文件（{err} 份失敗）\n"
-                f"摘要已填入「案件描述」\n"
-                f"提取 {imported} 筆涉案地址/帳戶，目前顯示於「涉案錢包 / 帳戶」分頁。",
+                f"筆錄原文已匯入「筆錄內容」欄位\n"
+                f"提取 {imported} 筆涉案地址/帳戶，已顯示於「涉案錢包 / 帳戶」分頁。",
                 parent=self)
         else:
             if self._auto_save():
@@ -309,18 +399,18 @@ class CaseDialog(ctk.CTkToplevel):
                 self._init_victim_panel()
                 self._tabs.set("涉案錢包 / 帳戶")
                 messagebox.showinfo(
-                    "文件匯入完成",
+                    "筆錄匯入完成",
                     f"已處理 {proc} 份文件（{err} 份失敗）\n"
                     f"案件已自動儲存\n"
-                    f"提取 {imported} 筆涉案地址/帳戶，目前顯示於「涉案錢包 / 帳戶」分頁。",
+                    f"提取 {imported} 筆涉案地址/帳戶，已顯示於「涉案錢包 / 帳戶」分頁。",
                     parent=self)
             else:
                 self._pending_addrs = addrs
                 self._update_pending_hint()
                 messagebox.showinfo(
-                    "文件分析完成（暫存）",
+                    "筆錄匯入完成（暫存）",
                     f"已處理 {proc} 份文件（{err} 份失敗）\n"
-                    f"摘要已填入「案件描述」\n"
+                    f"筆錄原文已匯入「筆錄內容」欄位\n"
                     f"提取到 {len(addrs)} 筆涉案地址/帳戶。\n\n"
                     "⚠ 案件尚未儲存（請填寫案件名稱）\n"
                     "儲存案件後地址/帳戶將自動匯入。",
@@ -346,6 +436,8 @@ class CaseDialog(ctk.CTkToplevel):
         _set(self._inv_e,  "investigator")
         self._type_var.set(case.get("case_type", _CASE_TYPES[0]))
         self._status_var.set(case.get("status", _CASE_STATUSES[0]))
+        self._transcript_t.delete("1.0", "end")
+        self._transcript_t.insert("1.0", case.get("transcript", "") or "")
         self._desc_t.delete("1.0", "end")
         self._desc_t.insert("1.0", case.get("description", "") or "")
         self._notes_t.delete("1.0", "end")
@@ -378,6 +470,7 @@ class CaseDialog(ctk.CTkToplevel):
             "case_type":    self._type_var.get(),
             "status":       self._status_var.get(),
             "investigator": self._inv_e.get().strip(),
+            "transcript":   self._transcript_t.get("1.0", "end").strip(),
             "description":  self._desc_t.get("1.0", "end").strip(),
             "notes":        self._notes_t.get("1.0", "end").strip(),
         }
@@ -401,9 +494,13 @@ class CaseDialog(ctk.CTkToplevel):
             else:
                 self._case_id = _db.create_case(**data)
                 result        = {**data, "id": self._case_id}
-            # 初始化被害人交易面板（若尚未建立）
+            # 初始化各分頁面板（若尚未建立）
             if self._victim_tx_panel is None:
                 self._init_victim_panel()
+            if self._bank_tx_panel is None:
+                self._init_bank_tx_panel()
+            if self._chain_tx_panel is None:
+                self._init_chain_tx_panel()
             # 補匯入暫存的文件分析地址/帳戶
             pending_msg = ""
             if self._pending_addrs:

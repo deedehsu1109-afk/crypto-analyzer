@@ -37,13 +37,19 @@ class AddressDialog(ctk.CTkToplevel):
         self.geometry("620x480")
         self.resizable(False, False)
         self.configure(fg_color=BG_PANEL)
-        self.transient(self.winfo_toplevel())
+        self.transient(parent.winfo_toplevel())
         self.lift()
         self.focus_force()
-        self.after(100, self.grab_set)
         self._build()
         if row:
             self._fill(row)
+        self.after(50, self._safe_grab)
+
+    def _safe_grab(self):
+        try:
+            self.grab_set()
+        except Exception:
+            self.after(50, self._safe_grab)
 
     def _lbl(self, parent, text, row, required=False):
         color = "#ff9999" if required else None
@@ -60,6 +66,7 @@ class AddressDialog(ctk.CTkToplevel):
 
     def _build(self):
         self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(0, weight=1)
         f = ctk.CTkFrame(self, corner_radius=10)
         f.grid(row=0, column=0, sticky="nsew", padx=14, pady=14)
         f.grid_columnconfigure(1, weight=1)
@@ -173,6 +180,7 @@ class CaseAddressPanel(ctk.CTkFrame):
     def __init__(self, parent, case_id: int):
         super().__init__(parent, fg_color=BG_PANEL, corner_radius=0)
         self.case_id = case_id
+        self._active_dialog: AddressDialog | None = None
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
         self._build()
@@ -236,7 +244,7 @@ class CaseAddressPanel(ctk.CTkFrame):
         self._tree.tag_configure("suspect", foreground="#ff9944")
         self._tree.tag_configure("victim",  foreground="#66dd66")
 
-        self._tree.bind("<Double-1>", lambda _: self._edit())
+        self._tree.bind("<Double-1>", lambda e: self._edit())
 
     def _load(self):
         for row in self._tree.get_children():
@@ -261,15 +269,26 @@ class CaseAddressPanel(ctk.CTkFrame):
         rows = _db.get_case_addresses(self.case_id)
         return next((r for r in rows if str(r["id"]) == iid), None)
 
+    def _dialog_open(self) -> bool:
+        if self._active_dialog and self._active_dialog.winfo_exists():
+            self._active_dialog.focus_force()
+            return True
+        self._active_dialog = None
+        return False
+
     def _add(self):
-        AddressDialog(self, self.case_id, on_save=self._load)
+        if self._dialog_open():
+            return
+        self._active_dialog = AddressDialog(self, self.case_id, on_save=self._load)
 
     def _edit(self):
+        if self._dialog_open():
+            return
         row = self._selected_row()
         if not row:
             messagebox.showinfo("請先選取", "請先點選一筆記錄", parent=self)
             return
-        AddressDialog(self, self.case_id, row=row, on_save=self._load)
+        self._active_dialog = AddressDialog(self, self.case_id, row=row, on_save=self._load)
 
     def _delete(self):
         sel = self._tree.selection()

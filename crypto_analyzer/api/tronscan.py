@@ -5,9 +5,12 @@ BASE_URL = "https://apilist.tronscanapi.com/api"
 
 
 class TronScanAPI:
-    def __init__(self):
+    def __init__(self, api_key: str = ""):
         self.session = requests.Session()
-        self.session.headers.update({"User-Agent": "CryptoAnalyzer/1.0"})
+        headers = {"User-Agent": "CryptoAnalyzer/1.0"}
+        if api_key:
+            headers["TRON-PRO-API-KEY"] = api_key
+        self.session.headers.update(headers)
 
     def _get(self, endpoint: str, params: dict) -> dict:
         url = f"{BASE_URL}/{endpoint}"
@@ -35,12 +38,11 @@ class TronScanAPI:
         results = []
         start = 0
         page_size = 50
+        # 移除 sort=-timestamp（已不被接受），端點預設即為時間降序
         params_base: dict = {
             "address": address,
             "limit": page_size,
-            "sort": "-timestamp",
         }
-        # TronScan 支援 min_timestamp / max_timestamp（毫秒）
         if start_ts:
             params_base["min_timestamp"] = start_ts * 1000
         if end_ts:
@@ -63,10 +65,10 @@ class TronScanAPI:
         results = []
         start = 0
         page_size = 50
+        # 移除 sort=-block_ts（已不被接受），端點預設即為時間降序
         params_base: dict = {
             "relatedAddress": address,
             "limit": page_size,
-            "sort": "-block_ts",
         }
         if start_ts:
             params_base["start_timestamp"] = start_ts * 1000

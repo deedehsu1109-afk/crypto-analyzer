@@ -29,7 +29,8 @@ def init_db():
             investigator  TEXT,
             created_at    TEXT    DEFAULT (datetime('now','localtime')),
             updated_at    TEXT    DEFAULT (datetime('now','localtime')),
-            description   TEXT,
+            transcript    TEXT,   -- 筆錄原文（從文件匯入的完整內容）
+            description   TEXT,   -- 案件摘要（使用者自行填寫，顯示為「說明」）
             notes         TEXT
         );
 
@@ -170,6 +171,46 @@ def init_db():
             updated_at        TEXT    DEFAULT (datetime('now','localtime'))
         );
         CREATE INDEX IF NOT EXISTS idx_case_addr_case ON case_addresses(case_id);
+
+        -- ── 一般帳戶交易紀錄 ─────────────────────────────────────────────────────
+        CREATE TABLE IF NOT EXISTS case_bank_transactions (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id             INTEGER REFERENCES cases(id) ON DELETE CASCADE,
+            tx_date             TEXT,           -- YYYY-MM-DD
+            tx_time             TEXT,           -- HH:MM
+            direction           TEXT DEFAULT '不明',  -- 入帳 / 出帳 / 不明
+            bank_name           TEXT,           -- 銀行名稱
+            account_no          TEXT,           -- 帳戶號碼
+            counterpart_name    TEXT,           -- 對方戶名
+            counterpart_account TEXT,           -- 對方帳號
+            amount              REAL,           -- 金額
+            currency            TEXT DEFAULT 'TWD',
+            balance             REAL,           -- 餘額（選填）
+            notes               TEXT,
+            source_doc          TEXT,
+            created_at          TEXT DEFAULT (datetime('now','localtime')),
+            updated_at          TEXT DEFAULT (datetime('now','localtime'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_bank_tx_case ON case_bank_transactions(case_id);
+
+        -- ── 區塊鏈交易紀錄 ────────────────────────────────────────────────────────
+        CREATE TABLE IF NOT EXISTS case_chain_transactions (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id      INTEGER REFERENCES cases(id) ON DELETE CASCADE,
+            chain        TEXT NOT NULL DEFAULT 'TRX',
+            direction    TEXT DEFAULT '不明',   -- 入帳 / 出帳 / 不明
+            tx_datetime  TEXT,                  -- YYYY-MM-DD HH:MM:SS
+            tx_hash      TEXT,
+            from_addr    TEXT,
+            to_addr      TEXT,
+            amount       REAL,
+            token_symbol TEXT,                  -- USDT / TRX / ETH …
+            notes        TEXT,
+            source_doc   TEXT,
+            created_at   TEXT DEFAULT (datetime('now','localtime')),
+            updated_at   TEXT DEFAULT (datetime('now','localtime'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_chain_tx_case ON case_chain_transactions(case_id);
         """)
         # 遷移：對舊資料庫補欄位（若尚未存在）
         _migrate(con)
@@ -184,6 +225,9 @@ def _migrate(con: sqlite3.Connection):
     existing_l = {r[1] for r in con.execute("PRAGMA table_info(tx_lookups)").fetchall()}
     if "case_id" not in existing_l:
         con.execute("ALTER TABLE tx_lookups ADD COLUMN case_id INTEGER REFERENCES cases(id) ON DELETE SET NULL")
+    existing_c = {r[1] for r in con.execute("PRAGMA table_info(cases)").fetchall()}
+    if "transcript" not in existing_c:
+        con.execute("ALTER TABLE cases ADD COLUMN transcript TEXT")
     # case_id 欄位存在後才能建索引
     con.execute("CREATE INDEX IF NOT EXISTS idx_wallets_case ON wallets(case_id)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_lookups_case ON tx_lookups(case_id)")
@@ -475,20 +519,21 @@ def search_address(keyword: str) -> list[dict]:
 
 def create_case(case_number: str, case_name: str, case_type: str = "一般",
                 status: str = "進行中", investigator: str = "",
-                description: str = "", notes: str = "") -> int:
+                transcript: str = "", description: str = "",
+                notes: str = "") -> int:
     with _conn() as con:
         cur = con.execute("""
             INSERT INTO cases (case_number, case_name, case_type,
-                               status, investigator, description, notes)
-            VALUES (?,?,?,?,?,?,?)
+                               status, investigator, transcript, description, notes)
+            VALUES (?,?,?,?,?,?,?,?)
         """, (case_number, case_name, case_type, status,
-              investigator, description, notes))
+              investigator, transcript, description, notes))
         return cur.lastrowid
 
 
 def update_case(case_id: int, **kwargs):
     allowed = {"case_name", "case_type", "status", "investigator",
-               "description", "notes"}
+               "transcript", "description", "notes"}
     fields  = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields:
         return
@@ -670,6 +715,84 @@ def upsert_case_address(case_id: int, data: dict) -> int:
 def delete_case_address(addr_id: int):
     with _conn() as con:
         con.execute("DELETE FROM case_addresses WHERE id=?", (addr_id,))
+
+
+# ── 一般帳戶交易紀錄 ──────────────────────────────────────────────────────────
+
+def get_bank_transactions(case_id: int) -> list[dict]:
+    with _conn() as con:
+        rows = con.execute(
+            "SELECT * FROM case_bank_transactions WHERE case_id=? "
+            "ORDER BY tx_date DESC, tx_time DESC, id DESC",
+            (case_id,)
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def upsert_bank_transaction(case_id: int, data: dict) -> int:
+    fields = ["tx_date", "tx_time", "direction", "bank_name", "account_no",
+              "counterpart_name", "counterpart_account", "amount", "currency",
+              "balance", "notes", "source_doc"]
+    row_id = data.get("id")
+    if row_id:
+        sets = ", ".join(f"{f}=?" for f in fields)
+        sets += ", updated_at=datetime('now','localtime')"
+        vals = [data.get(f) for f in fields] + [row_id]
+        with _conn() as con:
+            con.execute(f"UPDATE case_bank_transactions SET {sets} WHERE id=?", vals)
+        return row_id
+    else:
+        cols = ", ".join(["case_id"] + fields)
+        qs   = ", ".join(["?"] * (len(fields) + 1))
+        vals = [case_id] + [data.get(f) for f in fields]
+        with _conn() as con:
+            cur = con.execute(
+                f"INSERT INTO case_bank_transactions ({cols}) VALUES ({qs})", vals)
+            return cur.lastrowid
+
+
+def delete_bank_transaction(tx_id: int):
+    with _conn() as con:
+        con.execute("DELETE FROM case_bank_transactions WHERE id=?", (tx_id,))
+
+
+# ── 區塊鏈交易紀錄 ────────────────────────────────────────────────────────────
+
+def get_chain_transactions(case_id: int) -> list[dict]:
+    with _conn() as con:
+        rows = con.execute(
+            "SELECT * FROM case_chain_transactions WHERE case_id=? "
+            "ORDER BY tx_datetime DESC, id DESC",
+            (case_id,)
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def upsert_chain_transaction(case_id: int, data: dict) -> int:
+    fields = ["chain", "direction", "tx_datetime", "tx_hash",
+              "from_addr", "to_addr", "amount", "token_symbol",
+              "notes", "source_doc"]
+    row_id = data.get("id")
+    if row_id:
+        sets = ", ".join(f"{f}=?" for f in fields)
+        sets += ", updated_at=datetime('now','localtime')"
+        vals = [data.get(f) for f in fields] + [row_id]
+        with _conn() as con:
+            con.execute(f"UPDATE case_chain_transactions SET {sets} WHERE id=?", vals)
+        return row_id
+    else:
+        cols = ", ".join(["case_id"] + fields)
+        qs   = ", ".join(["?"] * (len(fields) + 1))
+        vals = [case_id] + [data.get(f) for f in fields]
+        with _conn() as con:
+            cur = con.execute(
+                f"INSERT INTO case_chain_transactions ({cols}) VALUES ({qs})", vals)
+            return cur.lastrowid
+
+
+def delete_chain_transaction(tx_id: int):
+    with _conn() as con:
+        con.execute("DELETE FROM case_chain_transactions WHERE id=?", (tx_id,))
 
 
 # ── 幣流圖：邊資料接口 ────────────────────────────────────────────────────────

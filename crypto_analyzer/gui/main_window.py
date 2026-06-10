@@ -3,6 +3,7 @@ import threading
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import customtkinter as ctk
+import datetime
 
 from config import load_config, save_config
 from api.etherscan import EtherscanAPI
@@ -16,30 +17,107 @@ from analyzer.time_filter import (parse_datetime_str, ts_to_str,
 from exporter.report import export_excel, export_csv
 from database import db as _db
 from gui.case_window import CaseDialog, LinkToCaseDialog
-from gui.victim_tx_panel import VictimTxPanel
+from gui.case_address_panel import CaseAddressPanel
 from gui.flow_graph_panel import FlowGraphPanel
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
-_NAV = [
-    ("📋", "案件管理",   "case"),
-    ("🔍", "地址側寫",   "profile"),
-    ("📊", "幣流關聯圖", "flow"),
-    ("🔗", "Hash 分析",  "hash"),
-    ("📜", "查詢歷史",   "history"),
+_STEPS = [
+    ("1", "歡迎說明"),
+    ("2", "使用者身分"),
+    ("3", "案件選擇"),
+    ("4", "案件資料"),
+    ("5", "幣流圖"),
+    ("6", "產製報告"),
 ]
+
+_WELCOME_TEXT = """\
+【系統簡介】
+
+本系統（CryptoAnalyzer）為虛擬貨幣鑑識分析工具，專為司法調查人員設計，
+用於分析區塊鏈交易紀錄、建立幣流關係圖，並產製符合法庭標準的鑑識報告。
+
+支援鏈別：  以太坊（ETH）  ·  波場（TRX）  ·  比特幣（BTC）
+
+──────────────────────────────────────────────────────────────
+
+【操作流程】
+
+  步驟 2  ▶  輸入使用者身分（每次開啟系統均須確認，納入操作稽核軌跡）
+  步驟 3  ▶  建立新案件或載入既有案件
+  步驟 4  ▶  輸入涉案錢包地址或交易 Hash 進行分析，管理涉案地址清單
+  步驟 5  ▶  建立幣流關係圖，視覺化金流路徑與節點關係
+  步驟 6  ▶  產製司法鑑識報告（Word 格式）
+
+──────────────────────────────────────────────────────────────
+
+【查證義務（依據中華民國《刑事訴訟法》第 165 條之 1）】
+
+電磁紀錄作為數位證據時，使用者負有下列查證義務：
+
+  ▪  原始性（Originality）
+     本工具不修改任何原始區塊鏈資料，僅讀取公開資訊。
+
+  ▪  完整性（Integrity）
+     分析過程中應確保資料完整性；建議對產出報告計算雜湊值並留存備查。
+
+  ▪  可驗證性（Verifiability）
+     所有分析操作均可重現；API 來源與時間戳均記錄於原始資料欄位。
+
+  ▪  稽核軌跡（Chain of Custody）
+     請確實記錄分析人員身分、分析時間及目的，以備法庭審查。
+
+──────────────────────────────────────────────────────────────
+
+【ACPO 四大原則（英國電腦犯罪調查指引）】
+
+  原則一  不應以任何行為改變電子設備上可能於法庭作為證據的資料。
+
+  原則二  在必要情況下，必須由具備勝任能力的人員存取原始數位資料，
+          並記錄存取過程。
+
+  原則三  所有數位證據的蒐集、存取、儲存及傳輸均應建立完整稽核軌跡。
+
+  原則四  本調查案件的負責人員應對上述原則的遵循負全責。
+
+──────────────────────────────────────────────────────────────
+
+【適用標準】
+
+  ▪  ISO/IEC 27037:2012  數位證據識別、蒐集、獲取及保全指引
+  ▪  ACPO Good Practice Guide for Digital Evidence（2012 版）
+  ▪  Scientific Working Group on Digital Evidence（SWGDE）準則
+
+──────────────────────────────────────────────────────────────
+
+【資料來源與免責聲明】
+
+本工具透過以下公開 API 取得區塊鏈資料：
+  ▪  Etherscan V2 API（以太坊）          ▪  TronScan API（波場）
+  ▪  Blockchain.com API（比特幣）        ▪  CoinGecko API（歷史幣價）
+
+分析結果僅供調查參考。使用者應自行確認資料來源的可靠性，並遵守相關法律法規。
+分析結果不構成法律意見，引用於法庭前請諮詢合格法律專業人士。
+
+──────────────────────────────────────────────────────────────
+
+請閱讀並理解以上內容後，點選下方「我已了解，開始使用」繼續。
+"""
 
 
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("虛擬貨幣錢包分析工具 v1.0")
-        self.geometry("1300x820")
+        self.title("虛擬貨幣鑑識分析系統  CryptoAnalyzer v2.0")
+        self.geometry("1400x900")
         self.resizable(True, True)
-        self.config_data  = load_config()
+        self.config_data          = load_config()
         self._profile: dict | None = None
         self._active_case: dict | None = None
+        self._current_step        = 0
+        self._case_addr_panel: CaseAddressPanel | None = None
+        self._selected_case_id: int | None = None
         self._build_ui()
 
     # ═══════════════════════════════════════════════════════════════════════════
@@ -50,148 +128,756 @@ class App(ctk.CTk):
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
 
-        self._build_header()
+        self._build_step_bar()
 
-        body = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
-        body.grid(row=1, column=0, sticky="nsew")
-        body.grid_columnconfigure(1, weight=1)
-        body.grid_rowconfigure(0, weight=1)
-
-        self._build_sidebar(body)
-
-        self._content = ctk.CTkFrame(body, corner_radius=0, fg_color="transparent")
-        self._content.grid(row=0, column=1, sticky="nsew", padx=(0, 8), pady=8)
+        self._content = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
+        self._content.grid(row=1, column=0, sticky="nsew", padx=10, pady=(4, 6))
         self._content.grid_columnconfigure(0, weight=1)
         self._content.grid_rowconfigure(0, weight=1)
 
-        # 全域狀態列 + 進度條
+        # 狀態列
         self.status_var = tk.StringVar(value="就緒")
-        ctk.CTkLabel(self, textvariable=self.status_var,
-                     anchor="w", font=("Microsoft JhengHei", 11)).grid(
-            row=2, column=0, sticky="ew", padx=14, pady=(0, 2))
+        sbar = ctk.CTkFrame(self, corner_radius=0, fg_color="#080d14", height=24)
+        sbar.grid(row=2, column=0, sticky="ew")
+        sbar.grid_propagate(False)
+        sbar.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(sbar, textvariable=self.status_var,
+                     anchor="w", font=("Microsoft JhengHei", 10),
+                     text_color="gray60").grid(row=0, column=0, padx=12, sticky="w")
 
-        self.progress = ctk.CTkProgressBar(self, mode="indeterminate", height=5)
-        self.progress.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 6))
+        self.progress = ctk.CTkProgressBar(self, mode="indeterminate", height=3)
+        self.progress.grid(row=3, column=0, sticky="ew")
         self.progress.stop()
         self.progress.grid_remove()
 
         # 建立各頁面
         self._pages: dict[str, ctk.CTkFrame] = {}
-        self._build_case_page()
-        self._build_profile_page()
+        self._build_welcome_page()
+        self._build_identity_page()
+        self._build_case_setup_page()
+        self._build_case_data_page()
         self._build_flow_page()
-        self._build_hash_page()
-        self._build_history_page()
-        self._build_settings_page()
+        self._build_report_page()
 
-        self._show_page("profile")
+        self._show_step(0)
 
-    # ── 頂部標頭 ────────────────────────────────────────────────────────────────
+    # ── 步驟條 ──────────────────────────────────────────────────────────────────
 
-    def _build_header(self):
-        hdr = ctk.CTkFrame(self, corner_radius=0, fg_color="#0d1117", height=50)
-        hdr.grid(row=0, column=0, sticky="ew")
-        hdr.grid_columnconfigure(1, weight=1)
-        hdr.grid_propagate(False)
+    def _build_step_bar(self):
+        bar = ctk.CTkFrame(self, corner_radius=0, fg_color="#0a0f1a", height=58)
+        bar.grid(row=0, column=0, sticky="ew")
+        bar.grid_propagate(False)
+        bar.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(hdr, text="⛓ CryptoAnalyzer",
-                     font=("Microsoft JhengHei", 14, "bold"),
-                     text_color="#60a5fa").grid(
-            row=0, column=0, padx=(18, 28), pady=10, sticky="w")
+        left = ctk.CTkFrame(bar, fg_color="transparent")
+        left.grid(row=0, column=0, padx=(16, 0), pady=10, sticky="w")
+        ctk.CTkLabel(left, text="⛓  CryptoAnalyzer",
+                     font=("Microsoft JhengHei", 13, "bold"),
+                     text_color="#60a5fa").pack(side="left")
+        self._case_header_lbl = ctk.CTkLabel(
+            left, text="",
+            font=("Microsoft JhengHei", 11), text_color="#f5a623")
+        self._case_header_lbl.pack(side="left", padx=(14, 0))
 
-        self._case_label = ctk.CTkLabel(
-            hdr, text="（未選擇案件）",
-            font=("Microsoft JhengHei", 12),
-            text_color="#f5a623", anchor="w")
-        self._case_label.grid(row=0, column=1, padx=8, pady=10, sticky="w")
+        mid = ctk.CTkFrame(bar, fg_color="transparent")
+        mid.grid(row=0, column=1, pady=10)
 
-        btn_bar = ctk.CTkFrame(hdr, fg_color="transparent")
-        btn_bar.grid(row=0, column=2, padx=(0, 14), pady=6, sticky="e")
-
-        ctk.CTkButton(btn_bar, text="切換案件", width=90,
-                      font=("Microsoft JhengHei", 11),
-                      fg_color="#2a4a8a",
-                      command=self._pick_case).pack(side="left", padx=3)
-        ctk.CTkButton(btn_bar, text="＋ 新建案件", width=100,
-                      font=("Microsoft JhengHei", 11),
-                      fg_color="#1d6b3e",
-                      command=self._new_case_quick).pack(side="left", padx=3)
-        ctk.CTkButton(btn_bar, text="清除案件", width=80,
-                      font=("Microsoft JhengHei", 11),
-                      fg_color="gray35",
-                      command=self._clear_case).pack(side="left", padx=3)
-
-    # ── 左側導覽列 ──────────────────────────────────────────────────────────────
-
-    def _build_sidebar(self, parent: ctk.CTkFrame):
-        sb = ctk.CTkFrame(parent, width=158, corner_radius=0, fg_color="#0f172a")
-        sb.grid(row=0, column=0, sticky="nsew")
-        sb.grid_rowconfigure(len(_NAV) + 1, weight=1)
-        sb.grid_propagate(False)
-
-        self._sidebar_btns: dict[str, ctk.CTkButton] = {}
-
-        for i, (icon, label, page_id) in enumerate(_NAV):
+        self._step_btns: list[ctk.CTkButton] = []
+        for i, (num, label) in enumerate(_STEPS):
             btn = ctk.CTkButton(
-                sb,
-                text=f"  {icon}  {label}",
-                anchor="w", width=150, height=42,
-                font=("Microsoft JhengHei", 12),
-                corner_radius=6,
+                mid,
+                text=f"  {num}  {label}  ",
+                height=34, width=110,
+                font=("Microsoft JhengHei", 11),
+                corner_radius=17,
                 fg_color="transparent",
-                hover_color="#1e3a5f",
-                text_color="white",
-                command=lambda pid=page_id: self._show_page(pid))
-            btn.grid(row=i, column=0,
-                     padx=4, pady=(6 if i == 0 else 2, 2), sticky="ew")
-            self._sidebar_btns[page_id] = btn
+                border_width=1,
+                border_color="#2d3748",
+                text_color="#4a5568",
+                hover_color="#1a2535",
+                command=lambda idx=i: self._on_step_click(idx),
+            )
+            btn.pack(side="left", padx=2)
+            self._step_btns.append(btn)
+            if i < len(_STEPS) - 1:
+                ctk.CTkLabel(mid, text="›", font=("Arial", 14),
+                             text_color="#2d3748").pack(side="left", padx=1)
 
-        settings_btn = ctk.CTkButton(
-            sb, text="  ⚙  設定",
-            anchor="w", width=150, height=38,
-            font=("Microsoft JhengHei", 11),
-            corner_radius=6,
-            fg_color="transparent",
-            hover_color="#1e3a5f",
-            text_color="gray60",
-            command=lambda: self._show_page("settings"))
-        settings_btn.grid(row=len(_NAV) + 2, column=0,
-                          padx=4, pady=(2, 10), sticky="sew")
-        self._sidebar_btns["settings"] = settings_btn
+        ctk.CTkButton(bar, text="⚙", width=34, height=34,
+                      font=("Arial", 15), corner_radius=17,
+                      fg_color="transparent", hover_color="#1a2535",
+                      text_color="gray50",
+                      command=self._open_settings).grid(
+            row=0, column=2, padx=(0, 14), pady=10)
 
-    def _show_page(self, page_id: str):
+    def _on_step_click(self, idx: int):
+        if idx >= 3 and not self._active_case:
+            messagebox.showinfo("請先選擇案件",
+                                "請完成步驟 3（選擇或建立案件）後，才能進入後續步驟。")
+            self._show_step(2)
+            return
+        self._show_step(idx)
+
+    def _show_step(self, idx: int):
+        self._current_step = idx
+        _keys = ["welcome", "identity", "case_setup", "case_data", "flow", "report"]
         for p in self._pages.values():
             p.grid_remove()
-        if page_id in self._pages:
-            self._pages[page_id].grid(row=0, column=0, sticky="nsew")
-        self._current_page = page_id
-        active_color = "#1e3a8a"
-        for pid, btn in self._sidebar_btns.items():
-            btn.configure(
-                fg_color=active_color if pid == page_id else "transparent",
-                text_color="white" if pid == page_id else
-                           ("gray60" if pid == "settings" else "white"))
+        key = _keys[idx]
+        if key in self._pages:
+            self._pages[key].grid(row=0, column=0, sticky="nsew")
+        # 進入報告頁時更新案件顯示
+        if idx == 5 and hasattr(self, "_report_case_lbl"):
+            if self._active_case:
+                self._report_case_lbl.configure(
+                    text=f"【{self._active_case['case_number']}】"
+                         f"{self._active_case['case_name']}",
+                    text_color="#7eb8f7")
+            else:
+                self._report_case_lbl.configure(
+                    text="尚未選擇案件", text_color="#f5a623")
+        for i, btn in enumerate(self._step_btns):
+            if i == idx:
+                btn.configure(fg_color="#1e3a8a", border_color="#3b82f6",
+                              text_color="white")
+            elif i < idx:
+                btn.configure(fg_color="#064e3b", border_color="#059669",
+                              text_color="#6ee7b7")
+            else:
+                btn.configure(fg_color="transparent", border_color="#2d3748",
+                              text_color="#4a5568")
+
+    def _go_next(self):
+        self._on_step_click(min(self._current_step + 1, len(_STEPS) - 1))
+
+    def _go_prev(self):
+        self._show_step(max(self._current_step - 1, 0))
+
+    def _show_case_data_tab(self, tab_name: str):
+        self._show_step(3)
+        if hasattr(self, "_data_tabs"):
+            self._data_tabs.set(tab_name)
+
+    # ── 設定對話框 ────────────────────────────────────────────────────────────
+
+    def _open_settings(self):
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("⚙  系統設定")
+        dlg.geometry("560x280")
+        dlg.resizable(False, False)
+        dlg.configure(fg_color="#1a1f2e")
+        dlg.transient(self)
+        dlg.lift()
+        dlg.focus_force()
+        dlg.after(100, dlg.grab_set)
+
+        inner = ctk.CTkFrame(dlg, corner_radius=10, fg_color="#1e2235")
+        inner.pack(fill="both", expand=True, padx=20, pady=20)
+        inner.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(inner, text="API 金鑰設定",
+                     font=("Microsoft JhengHei", 14, "bold")).grid(
+            row=0, column=0, columnspan=2, padx=16, pady=(16, 12), sticky="w")
+
+        eth_entry = trx_entry = None
+        for row_i, (lbl_text, cfg_key) in enumerate([
+            ("Etherscan API Key：",        "etherscan_api_key"),
+            ("TronGrid API Key（選填）：", "trongrid_api_key"),
+        ], start=1):
+            ctk.CTkLabel(inner, text=lbl_text,
+                         font=("Microsoft JhengHei", 12)).grid(
+                row=row_i, column=0, padx=(16, 8), pady=8, sticky="e")
+            e = ctk.CTkEntry(inner, font=("Consolas", 11))
+            e.insert(0, self.config_data.get(cfg_key, ""))
+            e.grid(row=row_i, column=1, padx=(0, 16), pady=8, sticky="ew")
+            self._bind_entry_context_menu(e)
+            if cfg_key == "etherscan_api_key":
+                eth_entry = e
+            else:
+                trx_entry = e
+
+        def save():
+            self.config_data["etherscan_api_key"] = eth_entry.get().strip()
+            self.config_data["trongrid_api_key"]  = trx_entry.get().strip()
+            save_config(self.config_data)
+            self.status_var.set("設定已儲存")
+            dlg.destroy()
+
+        ctk.CTkButton(inner, text="儲存設定",
+                      font=("Microsoft JhengHei", 12, "bold"),
+                      fg_color="#1d6b3e", width=120, command=save).grid(
+            row=3, column=0, columnspan=2, pady=(4, 16))
 
     # ═══════════════════════════════════════════════════════════════════════════
-    # 地址側寫頁
+    # 頁面 1：歡迎說明
     # ═══════════════════════════════════════════════════════════════════════════
 
-    def _build_profile_page(self):
+    def _build_welcome_page(self):
         page = ctk.CTkFrame(self._content, corner_radius=10)
-        self._pages["profile"] = page
+        self._pages["welcome"] = page
         page.grid_columnconfigure(0, weight=1)
-        page.grid_rowconfigure(2, weight=1)
+        page.grid_rowconfigure(0, weight=1)
 
-        # ── 查詢工具列 ──
-        top = ctk.CTkFrame(page, corner_radius=8)
-        top.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 4))
+        txt = ctk.CTkTextbox(page, font=("Microsoft JhengHei", 12),
+                             fg_color="#0d1520", text_color="#c9d1e0",
+                             corner_radius=8, wrap="word")
+        txt.grid(row=0, column=0, sticky="nsew", padx=16, pady=(16, 8))
+        txt.insert("0.0", _WELCOME_TEXT)
+        txt.configure(state="disabled")
+
+        bottom = ctk.CTkFrame(page, fg_color="transparent")
+        bottom.grid(row=1, column=0, pady=(4, 20))
+        ctk.CTkButton(
+            bottom,
+            text="我已閱讀並了解，開始使用  →",
+            font=("Microsoft JhengHei", 13, "bold"),
+            height=44, width=270,
+            fg_color="#1d4ed8", hover_color="#1e3a8a",
+            corner_radius=22,
+            command=lambda: self._show_step(1),
+        ).pack()
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # 頁面 2：使用者身分確認
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def _build_identity_page(self):
+        page = ctk.CTkFrame(self._content, corner_radius=10)
+        self._pages["identity"] = page
+        page.grid_columnconfigure(0, weight=1)
+        page.grid_rowconfigure(1, weight=1)
+
+        title_f = ctk.CTkFrame(page, fg_color="transparent")
+        title_f.grid(row=0, column=0, pady=(32, 0))
+        ctk.CTkLabel(title_f, text="使用者身分確認",
+                     font=("Microsoft JhengHei", 20, "bold"),
+                     text_color="#e2e8f0").pack()
+        ctk.CTkLabel(title_f,
+                     text="每次開啟系統均須確認，姓名與識別碼將納入操作稽核軌跡",
+                     font=("Microsoft JhengHei", 11), text_color="gray50").pack(pady=(6, 0))
+
+        card = ctk.CTkFrame(page, corner_radius=14, fg_color="#1a2035")
+        card.grid(row=1, column=0, pady=20, ipadx=10, ipady=6)
+        card.grid_columnconfigure(1, weight=1)
+
+        op = self.config_data.get("operator", {})
+        fields = [
+            ("姓名 *",       "identity_name",    "請輸入真實姓名",           True),
+            ("識別碼 *",     "identity_id",      "警員編號 / 調查員 ID",      True),
+            ("服務單位",     "identity_unit",    "例：刑事警察局",            False),
+            ("查詢目的",     "identity_purpose", "例：偵查 114 年刑案 XXXX 號", False),
+        ]
+        self._identity_entries: dict[str, ctk.CTkEntry] = {}
+        for i, (label, key, placeholder, required) in enumerate(fields):
+            color = "#fca5a5" if required else "#94a3b8"
+            ctk.CTkLabel(card, text=label,
+                         font=("Microsoft JhengHei", 12, "bold"),
+                         text_color=color, anchor="e", width=110).grid(
+                row=i, column=0, padx=(28, 10), pady=12, sticky="e")
+            e = ctk.CTkEntry(card, font=("Microsoft JhengHei", 12),
+                             placeholder_text=placeholder, width=340)
+            e.insert(0, op.get(key, ""))
+            e.grid(row=i, column=1, padx=(0, 28), pady=12, sticky="w")
+            self._bind_entry_context_menu(e)
+            self._identity_entries[key] = e
+
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ctk.CTkLabel(card, text="確認時間",
+                     font=("Microsoft JhengHei", 12, "bold"),
+                     text_color="#94a3b8", anchor="e", width=110).grid(
+            row=len(fields), column=0, padx=(28, 10), pady=12, sticky="e")
+        ctk.CTkLabel(card, text=now_str,
+                     font=("Consolas", 12), text_color="#60a5fa").grid(
+            row=len(fields), column=1, padx=(0, 28), pady=12, sticky="w")
+
+        bottom = ctk.CTkFrame(page, fg_color="transparent")
+        bottom.grid(row=2, column=0, pady=(4, 32))
+        btn_row = ctk.CTkFrame(bottom, fg_color="transparent")
+        btn_row.pack()
+        ctk.CTkButton(btn_row, text="← 返回說明",
+                      font=("Microsoft JhengHei", 11),
+                      width=110, height=38, fg_color="gray30",
+                      command=self._go_prev).pack(side="left", padx=8)
+        ctk.CTkButton(btn_row,
+                      text="確認身分，進入案件選擇  →",
+                      font=("Microsoft JhengHei", 13, "bold"),
+                      height=44, width=250,
+                      fg_color="#1d4ed8", hover_color="#1e3a8a",
+                      corner_radius=22,
+                      command=self._on_identity_confirm).pack(side="left", padx=8)
+
+    def _on_identity_confirm(self):
+        name = self._identity_entries["identity_name"].get().strip()
+        iden = self._identity_entries["identity_id"].get().strip()
+        if not name or not iden:
+            messagebox.showwarning("必填欄位",
+                                   "「姓名」與「識別碼」為必填欄位，請填寫後繼續。")
+            return
+        op = {k: e.get().strip() for k, e in self._identity_entries.items()}
+        op["confirmed_at"] = datetime.datetime.now().isoformat()
+        self.config_data["operator"] = op
+        save_config(self.config_data)
+        self.status_var.set(
+            f"已確認：{name}（{iden}）　"
+            f"時間：{datetime.datetime.now().strftime('%H:%M:%S')}")
+        self._show_step(2)
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # 頁面 3：案件選擇
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def _build_case_setup_page(self):
+        page = ctk.CTkFrame(self._content, corner_radius=10)
+        self._pages["case_setup"] = page
+        page.grid_columnconfigure(0, weight=1)
+        page.grid_rowconfigure(0, weight=1)
+
+        # ── 置中捲動容器 ──
+        outer = ctk.CTkScrollableFrame(page, corner_radius=0,
+                                       fg_color="transparent")
+        outer.grid(row=0, column=0, sticky="nsew")
+        outer.grid_columnconfigure(0, weight=1)
+
+        card = ctk.CTkFrame(outer, corner_radius=12, fg_color="#0f1520")
+        card.grid(row=0, column=0, sticky="ew", padx=60, pady=30)
+        card.grid_columnconfigure(0, weight=1)
+
+        # ── 標題列 ──
+        hdr = ctk.CTkFrame(card, fg_color="transparent")
+        hdr.grid(row=0, column=0, sticky="ew", padx=24, pady=(22, 4))
+        ctk.CTkLabel(hdr, text="案件管理",
+                     font=("Microsoft JhengHei", 18, "bold"),
+                     text_color="#e2e8f0").pack(side="left")
+        ctk.CTkLabel(hdr, text="  選擇或建立案件後方可進入分析步驟",
+                     font=("Microsoft JhengHei", 10),
+                     text_color="gray50").pack(side="left", pady=(4, 0))
+
+        # 分隔線
+        ctk.CTkFrame(card, height=1, fg_color="#2a3556").grid(
+            row=1, column=0, sticky="ew", padx=24, pady=(0, 16))
+
+        # ── 下拉選單區 ──
+        sel_f = ctk.CTkFrame(card, fg_color="transparent")
+        sel_f.grid(row=2, column=0, sticky="ew", padx=24, pady=(0, 8))
+        sel_f.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(sel_f, text="選擇案件：",
+                     font=("Microsoft JhengHei", 13, "bold"),
+                     text_color="#aac4ff", width=90, anchor="e").grid(
+            row=0, column=0, padx=(0, 10), sticky="e")
+
+        self._case_combo = ctk.CTkComboBox(
+            sel_f,
+            values=[],
+            font=("Microsoft JhengHei", 12),
+            dropdown_font=("Microsoft JhengHei", 11),
+            state="readonly",
+            width=580, height=36,
+            command=self._on_case3_select)
+        self._case_combo.grid(row=0, column=1, sticky="ew")
+        self._case_combo_map: dict[str, dict] = {}
+
+        # ── 操作按鈕列 ──
+        btn_f = ctk.CTkFrame(card, fg_color="transparent")
+        btn_f.grid(row=3, column=0, padx=24, pady=(8, 4), sticky="w")
+        for txt, color, cmd in [
+            ("＋ 新建案件",     "#1d6b3e", self._case3_new),
+            ("✎ 編輯選取案件", "#2a4a8a", self._case3_edit),
+            ("🗑 刪除選取案件", "#7a1f1f", self._case3_delete),
+        ]:
+            ctk.CTkButton(btn_f, text=txt, height=34, width=140,
+                          font=("Microsoft JhengHei", 11),
+                          fg_color=color, command=cmd).pack(
+                side="left", padx=(0, 8))
+
+        # 分隔線
+        ctk.CTkFrame(card, height=1, fg_color="#2a3556").grid(
+            row=4, column=0, sticky="ew", padx=24, pady=14)
+
+        # ── 案件詳情 ──
+        ctk.CTkLabel(card, text="案件詳情",
+                     font=("Microsoft JhengHei", 13, "bold"),
+                     text_color="#aac4ff", anchor="w").grid(
+            row=5, column=0, padx=24, pady=(0, 6), sticky="w")
+
+        info_card = ctk.CTkFrame(card, corner_radius=8, fg_color="#0a0f1a")
+        info_card.grid(row=6, column=0, sticky="ew", padx=24, pady=(0, 14))
+        info_card.grid_columnconfigure(0, weight=1)
+        self._case3_info_lbl = ctk.CTkLabel(
+            info_card,
+            text="請從上方下拉選單選擇案件，或點「＋ 新建案件」建立新案件。",
+            font=("Microsoft JhengHei", 11), text_color="gray50",
+            anchor="nw", justify="left", wraplength=680)
+        self._case3_info_lbl.grid(row=0, column=0, padx=16, pady=14, sticky="nw")
+
+        # ── 目前作業案件 ──
+        ctk.CTkLabel(card, text="目前作業案件",
+                     font=("Microsoft JhengHei", 13, "bold"),
+                     text_color="#aac4ff", anchor="w").grid(
+            row=7, column=0, padx=24, pady=(0, 6), sticky="w")
+
+        active_card = ctk.CTkFrame(card, corner_radius=8, fg_color="#1a2744")
+        active_card.grid(row=8, column=0, sticky="ew", padx=24, pady=(0, 16))
+        active_card.grid_columnconfigure(0, weight=1)
+        self._case3_active_lbl = ctk.CTkLabel(
+            active_card, text="尚未選擇案件",
+            font=("Microsoft JhengHei", 13), text_color="#f5a623",
+            anchor="w", wraplength=680)
+        self._case3_active_lbl.grid(row=0, column=0, padx=16, pady=12, sticky="w")
+
+        # ── 底部操作按鈕 ──
+        bottom_f = ctk.CTkFrame(card, fg_color="transparent")
+        bottom_f.grid(row=9, column=0, padx=24, pady=(0, 24), sticky="w")
+        ctk.CTkButton(bottom_f, text="設為目前作業案件",
+                      font=("Microsoft JhengHei", 12, "bold"),
+                      height=40, width=170, fg_color="#1d5e8a",
+                      command=self._case3_set_active).pack(side="left", padx=(0, 10))
+        ctk.CTkButton(bottom_f, text="進入案件資料分析  →",
+                      font=("Microsoft JhengHei", 13, "bold"),
+                      height=40, width=200,
+                      fg_color="#1d4ed8", hover_color="#1e3a8a",
+                      corner_radius=20,
+                      command=self._case3_proceed).pack(side="left")
+
+        self._reload_case_list()
+
+    def _reload_case_list(self):
+        cases = _db.get_all_cases()
+        self._case_combo_map = {
+            f"{c['case_number']}　{c['case_name']}　（{c['case_type']} · {c['status']}）": c
+            for c in cases
+        }
+        values = list(self._case_combo_map.keys())
+        self._case_combo.configure(values=values)
+        if values:
+            cur = self._case_combo.get()
+            if cur not in self._case_combo_map:
+                self._case_combo.set(values[0])
+                self._on_case3_select(values[0])
+        else:
+            self._case_combo.set("")
+            self._case3_info_lbl.configure(
+                text="目前尚無案件，請點「＋ 新建案件」建立第一個案件。",
+                text_color="gray50")
+
+    def _on_case3_select(self, value=None):
+        if value is None:
+            value = self._case_combo.get()
+        case = self._case_combo_map.get(value)
+        if not case:
+            return
+        self._selected_case_id = case["id"]
+        case = _db.get_case(case["id"])
+        if not case:
+            return
+        wallets = _db.get_case_wallets(case["id"])
+        info = (
+            f"案件編號：{case['case_number']}\n"
+            f"案件名稱：{case['case_name']}\n"
+            f"類型：{case['case_type']}　　狀態：{case['status']}\n"
+            f"承辦人：{case.get('investigator') or '—'}\n"
+            f"建立時間：{case.get('created_at','')}\n"
+            f"說明：{(case.get('description') or '（無）')[:200]}\n"
+            f"關聯錢包：{len(wallets)} 個"
+        )
+        self._case3_info_lbl.configure(text=info, text_color="#c8d8f0")
+
+    def _case3_set_active(self):
+        if not self._selected_case_id:
+            messagebox.showinfo("提示", "請先從下拉選單選取一個案件")
+            return
+        case = _db.get_case(self._selected_case_id)
+        if case:
+            self._set_active_case(case)
+
+    def _case3_proceed(self):
+        if not self._active_case:
+            if self._selected_case_id:
+                case = _db.get_case(self._selected_case_id)
+                if case:
+                    self._set_active_case(case)
+                else:
+                    return
+            else:
+                messagebox.showinfo("請先選擇案件",
+                                    "請先從下拉選單選取案件或建立新案件，再進入分析頁面。")
+                return
+        self._show_step(3)
+
+    def _set_active_case(self, case: dict):
+        self._active_case = case
+        disp = (f"  【{case['case_number']}】{case['case_name']}"
+                f"  （{case['case_type']} · {case['status']}）")
+        self._case_header_lbl.configure(text=disp)
+        self._case3_active_lbl.configure(
+            text=f"【{case['case_number']}】{case['case_name']}"
+                 f"  ({case['case_type']} · {case['status']})",
+            text_color="#7eb8f7")
+        self.status_var.set(
+            f"作業案件：{case['case_number']} {case['case_name']}")
+        if hasattr(self, "_flow_panel"):
+            self._flow_panel.set_case_id(case["id"])
+        if hasattr(self, "_report_case_lbl"):
+            self._report_case_lbl.configure(
+                text=f"【{case['case_number']}】{case['case_name']}",
+                text_color="#7eb8f7")
+        self._refresh_case_addr_tab()
+        self._refresh_sidebar()
+
+    def _refresh_case_addr_tab(self):
+        if not self._active_case or not hasattr(self, "_addr_tab_frame"):
+            return
+        case_id = self._active_case["id"]
+        for w in self._addr_tab_frame.winfo_children():
+            w.destroy()
+        self._case_addr_panel = CaseAddressPanel(self._addr_tab_frame, case_id)
+        self._case_addr_panel.grid(row=0, column=0, sticky="nsew")
+
+    def _case3_new(self):
+        def on_save(c):
+            self._reload_case_list()
+            self._set_active_case(c)
+            key = next((k for k, v in self._case_combo_map.items()
+                        if v["id"] == c["id"]), None)
+            if key:
+                self._case_combo.set(key)
+        CaseDialog(self, on_save=on_save)
+
+    def _case3_edit(self):
+        if not self._selected_case_id:
+            messagebox.showinfo("提示", "請先從下拉選單選取要編輯的案件")
+            return
+        case = _db.get_case(self._selected_case_id)
+        if case:
+            def on_save(_):
+                self._reload_case_list()
+                self._on_case3_select()
+            CaseDialog(self, case=case, on_save=on_save)
+
+    def _case3_delete(self):
+        if not self._selected_case_id:
+            messagebox.showinfo("提示", "請先從下拉選單選取要刪除的案件")
+            return
+        case = _db.get_case(self._selected_case_id)
+        if not case:
+            return
+        if not messagebox.askyesno(
+                "確認刪除",
+                f"確定刪除案件【{case['case_number']}】{case['case_name']}？\n"
+                "（關聯錢包與 Hash 記錄不會被刪除，僅解除關聯）"):
+            return
+        del_id = self._selected_case_id
+        _db.delete_case(del_id)
+        if self._active_case and self._active_case["id"] == del_id:
+            self._active_case = None
+            self._case_header_lbl.configure(text="")
+            self._case3_active_lbl.configure(
+                text="尚未選擇案件", text_color="#f5a623")
+        self._selected_case_id = None
+        self._reload_case_list()
+        self._case3_info_lbl.configure(
+            text="案件已刪除。請從下拉選單選擇其他案件。",
+            text_color="gray50")
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # 頁面 4：案件資料
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def _build_case_data_page(self):
+        page = ctk.CTkFrame(self._content, corner_radius=10)
+        self._pages["case_data"] = page
+        page.grid_columnconfigure(0, weight=0)  # 左側清單（固定寬度）
+        page.grid_columnconfigure(1, weight=1)  # 右側分頁
+        page.grid_rowconfigure(0, weight=1)
+
+        # ── 左側：涉案地址 + 查詢紀錄清單 ──
+        self._build_case_sidebar(page)
+
+        # ── 右側：功能分頁 ──
+        tabs = ctk.CTkTabview(page, corner_radius=8)
+        tabs.grid(row=0, column=1, sticky="nsew", padx=(0, 8), pady=8)
+        for name in ["🔍  地址側寫", "🔗  Hash 分析", "📁  涉案錢包/帳戶", "📜  查詢歷史"]:
+            tabs.add(name)
+        self._data_tabs = tabs
+
+        self._build_profile_tab(tabs.tab("🔍  地址側寫"))
+        self._build_hash_tab(tabs.tab("🔗  Hash 分析"))
+        self._build_addr_tab(tabs.tab("📁  涉案錢包/帳戶"))
+        self._build_history_tab(tabs.tab("📜  查詢歷史"))
+
+    def _build_case_sidebar(self, page):
+        sidebar = ctk.CTkFrame(page, corner_radius=8,
+                               fg_color="#090e1a", width=230)
+        sidebar.grid(row=0, column=0, sticky="nsew", padx=(8, 4), pady=8)
+        sidebar.grid_propagate(False)
+        sidebar.grid_columnconfigure(0, weight=1)
+        sidebar.grid_rowconfigure(2, weight=3)  # 涉案地址清單
+        sidebar.grid_rowconfigure(5, weight=2)  # 查詢紀錄清單
+
+        # ── 標題列 ──
+        hdr = ctk.CTkFrame(sidebar, fg_color="#141d30", corner_radius=6)
+        hdr.grid(row=0, column=0, sticky="ew", padx=6, pady=(6, 0))
+        hdr.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(hdr, text="案件資料清單",
+                     font=("Microsoft JhengHei", 11, "bold"),
+                     text_color="#aac4ff", anchor="w").grid(
+            row=0, column=0, padx=10, pady=(8, 6), sticky="w")
+        ctk.CTkButton(hdr, text="↺", width=28, height=24,
+                      font=("Microsoft JhengHei", 12),
+                      fg_color="#2a3556", hover_color="#3a4a70",
+                      command=self._refresh_sidebar).grid(
+            row=0, column=1, padx=(2, 8), pady=(8, 6))
+
+        # ── 涉案地址 ──
+        ctk.CTkLabel(sidebar, text="涉案地址",
+                     font=("Microsoft JhengHei", 10, "bold"),
+                     text_color="#66aaff", anchor="w").grid(
+            row=1, column=0, sticky="w", padx=10, pady=(6, 2))
+        self._sidebar_addr_frame = ctk.CTkScrollableFrame(
+            sidebar, fg_color="#0c1220", corner_radius=4)
+        self._sidebar_addr_frame.grid(row=2, column=0,
+                                      sticky="nsew", padx=6, pady=(0, 4))
+        self._sidebar_addr_frame.grid_columnconfigure(0, weight=1)
+
+        # ── 分隔線 ──
+        ctk.CTkFrame(sidebar, height=1, fg_color="#2a3556").grid(
+            row=3, column=0, sticky="ew", padx=8, pady=2)
+
+        # ── 查詢紀錄 ──
+        ctk.CTkLabel(sidebar, text="查詢紀錄",
+                     font=("Microsoft JhengHei", 10, "bold"),
+                     text_color="#66aaff", anchor="w").grid(
+            row=4, column=0, sticky="w", padx=10, pady=(4, 2))
+        self._sidebar_hist_frame = ctk.CTkScrollableFrame(
+            sidebar, fg_color="#0c1220", corner_radius=4)
+        self._sidebar_hist_frame.grid(row=5, column=0,
+                                      sticky="nsew", padx=6, pady=(0, 6))
+        self._sidebar_hist_frame.grid_columnconfigure(0, weight=1)
+
+    def _refresh_sidebar(self):
+        if not self._active_case or not hasattr(self, "_sidebar_addr_frame"):
+            return
+        case_id = self._active_case["id"]
+
+        # ── 涉案地址 ──
+        for w in self._sidebar_addr_frame.winfo_children():
+            w.destroy()
+        addrs = _db.get_case_addresses(case_id)
+        if not addrs:
+            ctk.CTkLabel(self._sidebar_addr_frame,
+                         text="（尚無涉案地址）",
+                         font=("Microsoft JhengHei", 9),
+                         text_color="gray50").pack(anchor="w", padx=6, pady=6)
+        else:
+            for a in addrs:
+                self._make_sidebar_addr_item(self._sidebar_addr_frame, a)
+
+        # ── 查詢紀錄 ──
+        for w in self._sidebar_hist_frame.winfo_children():
+            w.destroy()
+        wallets = _db.get_case_wallets(case_id)
+        if not wallets:
+            ctk.CTkLabel(self._sidebar_hist_frame,
+                         text="（尚無查詢紀錄）",
+                         font=("Microsoft JhengHei", 9),
+                         text_color="gray50").pack(anchor="w", padx=6, pady=6)
+        else:
+            for wlt in wallets:
+                self._make_sidebar_hist_item(self._sidebar_hist_frame, wlt)
+
+    @staticmethod
+    def _mask_address(address: str) -> str:
+        if len(address) > 14:
+            return address[:7] + "***" + address[-7:]
+        return address
+
+    def _make_sidebar_addr_item(self, parent, addr: dict):
+        is_crypto = addr.get("addr_type") == "加密錢包"
+        icon      = "🔵" if is_crypto else "🏦"
+        chain     = addr.get("chain_institution", "")
+        address   = addr.get("address", "")
+        role      = addr.get("holder_role") or "不明"
+        label     = addr.get("label") or ""
+
+        masked = self._mask_address(address)
+        role_color = {"被害人": "#66dd66", "嫌疑人": "#ff9944",
+                      "中間人": "#88aaff"}.get(role, "gray55")
+
+        item = ctk.CTkFrame(parent, fg_color="transparent", corner_radius=4)
+        item.pack(fill="x", padx=2, pady=1)
+        item.grid_columnconfigure(0, weight=1)
+
+        line1 = f"{icon} {chain}  {masked}"
+        line2 = f"  {label or role}"
+
+        if is_crypto:
+            ctk.CTkButton(
+                item, text=line1,
+                font=("Consolas", 11), anchor="w", height=26,
+                fg_color="transparent", hover_color="#1a2540",
+                text_color="#c0d4f0",
+                command=lambda a=address, c=chain: self._sidebar_click_addr(a, c)
+            ).grid(row=0, column=0, sticky="ew")
+        else:
+            ctk.CTkLabel(
+                item, text=line1,
+                font=("Consolas", 11), anchor="w",
+                text_color="#888888"
+            ).grid(row=0, column=0, sticky="ew", padx=4)
+
+        ctk.CTkLabel(item, text=line2,
+                     font=("Microsoft JhengHei", 10),
+                     text_color=role_color, anchor="w").grid(
+            row=1, column=0, sticky="ew", padx=10)
+
+    def _make_sidebar_hist_item(self, parent, wlt: dict):
+        chain   = wlt.get("chain", "")
+        address = wlt.get("address", "")
+        ts      = (wlt.get("analyzed_at") or "")[:10]
+        label   = wlt.get("label") or ""
+
+        masked  = self._mask_address(address)
+        display = f"{chain}  {masked}"
+        sub     = label if label else ts
+
+        item = ctk.CTkFrame(parent, fg_color="transparent", corner_radius=4)
+        item.pack(fill="x", padx=2, pady=1)
+        item.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkButton(
+            item, text=display,
+            font=("Consolas", 11), anchor="w", height=26,
+            fg_color="transparent", hover_color="#1a2540",
+            text_color="#c0d4f0",
+            command=lambda a=address, c=chain: self._sidebar_click_addr(a, c)
+        ).grid(row=0, column=0, sticky="ew")
+
+        ctk.CTkLabel(item, text=f"  {sub}",
+                     font=("Microsoft JhengHei", 10),
+                     text_color="gray55", anchor="w").grid(
+            row=1, column=0, sticky="ew", padx=10)
+
+    def _sidebar_click_addr(self, address: str, chain: str):
+        if chain in ("ETH", "TRX", "BTC"):
+            self.chain_var.set(chain)
+        self.addr_entry.delete(0, "end")
+        self.addr_entry.insert(0, address)
+        self._data_tabs.set("🔍  地址側寫")
+
+    # ── 地址側寫分頁 ──────────────────────────────────────────────────────────
+
+    def _build_profile_tab(self, parent: ctk.CTkFrame):
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_rowconfigure(2, weight=1)
+
+        top = ctk.CTkFrame(parent, corner_radius=8)
+        top.grid(row=0, column=0, sticky="ew", padx=4, pady=(4, 2))
         top.grid_columnconfigure(4, weight=1)
 
         self._query_mode = ctk.StringVar(value="一般查詢")
         ctk.CTkSegmentedButton(
             top, values=["一般查詢", "專案查詢"],
-            variable=self._query_mode,
-            width=185,
+            variable=self._query_mode, width=185,
             font=("Microsoft JhengHei", 11),
             command=self._on_mode_change).grid(
             row=0, column=0, padx=(10, 6), pady=8)
@@ -210,81 +896,71 @@ class App(ctk.CTk):
                      font=("Microsoft JhengHei", 12)).grid(
             row=0, column=3, padx=(8, 4), pady=8)
         self.addr_entry = ctk.CTkEntry(
-            top, placeholder_text="輸入錢包地址（也可輸入 Hash 自動導向）",
+            top, placeholder_text="輸入錢包地址（或 Hash，自動導向）",
             font=("Consolas", 11))
         self.addr_entry.grid(row=0, column=4, padx=4, pady=8, sticky="ew")
-        self.addr_entry.bind("<FocusOut>",  self._on_addr_focusout)
+        self.addr_entry.bind("<FocusOut>",   self._on_addr_focusout)
         self.addr_entry.bind("<KeyRelease>", self._on_addr_keyrelease)
         self.addr_entry.bind("<Return>",     lambda _: self._start_smart_query())
         self._bind_entry_context_menu(self.addr_entry)
 
         self.analyze_btn = ctk.CTkButton(
-            top, text="開始查詢", width=95,
+            top, text="開始查詢", width=90,
             font=("Microsoft JhengHei", 12, "bold"),
             command=self._start_smart_query)
         self.analyze_btn.grid(row=0, column=5, padx=(6, 2), pady=8)
 
         self._clear_btn = ctk.CTkButton(
             top, text="清除", width=60,
-            font=("Microsoft JhengHei", 11),
-            fg_color="#6b3a1f",
+            font=("Microsoft JhengHei", 11), fg_color="#6b3a1f",
             command=self._clear_results)
         self._clear_btn.grid(row=0, column=6, padx=2, pady=8)
 
         self.export_excel_btn = ctk.CTkButton(
             top, text="Excel", width=68,
-            font=("Microsoft JhengHei", 11),
-            fg_color="#2d6a4f",
+            font=("Microsoft JhengHei", 11), fg_color="#2d6a4f",
             command=self._export_excel)
         self.export_excel_btn.grid(row=0, column=7, padx=2, pady=8)
 
         self.export_csv_btn = ctk.CTkButton(
             top, text="CSV", width=58,
-            font=("Microsoft JhengHei", 11),
-            fg_color="#5e3a8a",
+            font=("Microsoft JhengHei", 11), fg_color="#5e3a8a",
             command=self._export_csv)
         self.export_csv_btn.grid(row=0, column=8, padx=2, pady=8)
 
         self.flow_btn = ctk.CTkButton(
-            top, text="加入幣流圖", width=95,
-            font=("Microsoft JhengHei", 11),
-            fg_color="#4a2d6a",
+            top, text="加入幣流圖", width=90,
+            font=("Microsoft JhengHei", 11), fg_color="#4a2d6a",
             command=self._add_to_flow_graph)
         self.flow_btn.grid(row=0, column=9, padx=(2, 8), pady=8)
 
-        # ── 時間篩選（可折疊）──
-        tf_wrap = ctk.CTkFrame(page, fg_color="transparent")
-        tf_wrap.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 2))
-
+        # 時間篩選
+        tf_wrap = ctk.CTkFrame(parent, fg_color="transparent")
+        tf_wrap.grid(row=1, column=0, sticky="ew", padx=4, pady=(0, 2))
         self._time_bar_visible = False
         self._time_toggle_btn = ctk.CTkButton(
             tf_wrap, text="⏱ 時間篩選 ▼", width=120,
-            font=("Microsoft JhengHei", 11),
-            fg_color="#3a3a5a",
+            font=("Microsoft JhengHei", 11), fg_color="#3a3a5a",
             command=self._toggle_time_bar)
         self._time_toggle_btn.pack(side="top", anchor="w")
-
         self._time_bar = ctk.CTkFrame(tf_wrap, corner_radius=6, fg_color="#1e1e2e")
         self._build_time_bar(self._time_bar)
 
-        # ── 側寫子分頁（摘要/授權/原始交易/Token）──
-        self._profile_tabs = ctk.CTkTabview(page, corner_radius=8)
-        self._profile_tabs.grid(row=2, column=0, sticky="nsew", padx=8, pady=(2, 8))
+        # 側寫子分頁
+        self._profile_tabs = ctk.CTkTabview(parent, corner_radius=8)
+        self._profile_tabs.grid(row=2, column=0, sticky="nsew", padx=4, pady=(2, 4))
         for name in ["錢包摘要", "授權對象", "原始交易", "Token 轉帳"]:
             self._profile_tabs.add(name)
-
         self._build_summary_tab()
         self._build_approvals_tab()
-        self._build_tx_tab("原始交易",  "_tx_tree")
+        self._build_tx_tab("原始交易",   "_tx_tree")
         self._build_tx_tab("Token 轉帳", "_token_tree")
 
     def _build_time_bar(self, parent: ctk.CTkFrame):
         parent.grid_columnconfigure(7, weight=1)
-
         ctk.CTkLabel(parent, text="起始時間：",
                      font=("Microsoft JhengHei", 11, "bold"),
-                     text_color="#aaffaa").grid(
-            row=0, column=0, padx=(12, 4), pady=6)
+                     text_color="#aaffaa").grid(row=0, column=0, padx=(12, 4), pady=6)
         self._time_start = ctk.CTkEntry(
             parent, width=160, font=("Consolas", 11),
             placeholder_text="YYYY-MM-DD HH:MM:SS")
@@ -293,8 +969,7 @@ class App(ctk.CTk):
 
         ctk.CTkLabel(parent, text="迄止時間：",
                      font=("Microsoft JhengHei", 11, "bold"),
-                     text_color="#ffccaa").grid(
-            row=0, column=2, padx=(16, 4), pady=6)
+                     text_color="#ffccaa").grid(row=0, column=2, padx=(16, 4), pady=6)
         self._time_end = ctk.CTkEntry(
             parent, width=160, font=("Consolas", 11),
             placeholder_text="YYYY-MM-DD HH:MM:SS（選填）")
@@ -303,8 +978,7 @@ class App(ctk.CTk):
 
         ctk.CTkLabel(parent, text="前後各：",
                      font=("Microsoft JhengHei", 10),
-                     text_color="gray70").grid(
-            row=0, column=4, padx=(16, 2), pady=6)
+                     text_color="gray70").grid(row=0, column=4, padx=(16, 2), pady=6)
         self._time_each = ctk.CTkEntry(parent, width=55, font=("Consolas", 11))
         self._time_each.insert(0, "50")
         self._time_each.grid(row=0, column=5, padx=2, pady=6)
@@ -316,10 +990,8 @@ class App(ctk.CTk):
             parent, text="尚未設定時間",
             font=("Microsoft JhengHei", 10), text_color="gray60")
         self._time_mode_lbl.grid(row=0, column=7, padx=8, pady=6, sticky="w")
-
         ctk.CTkButton(parent, text="清除時間", width=80,
-                      font=("Microsoft JhengHei", 10),
-                      fg_color="gray35",
+                      font=("Microsoft JhengHei", 10), fg_color="gray35",
                       command=self._clear_time_filter).grid(
             row=0, column=8, padx=(4, 12), pady=6)
 
@@ -340,7 +1012,6 @@ class App(ctk.CTk):
         tab = self._profile_tabs.tab("錢包摘要")
         tab.grid_columnconfigure(0, weight=1)
         tab.grid_rowconfigure(0, weight=1)
-
         frame = ctk.CTkScrollableFrame(tab, corner_radius=8)
         frame.grid(row=0, column=0, sticky="nsew")
         frame.grid_columnconfigure(1, weight=1)
@@ -358,25 +1029,26 @@ class App(ctk.CTk):
         for i, f in enumerate(fields):
             is_sub = f.startswith("──")
             lbl = ctk.CTkLabel(frame, text=f + "：",
-                               font=("Microsoft JhengHei", 11 if is_sub else 12,
+                               font=("Microsoft JhengHei",
+                                     11 if is_sub else 12,
                                      "normal" if is_sub else "bold"),
                                text_color=("gray60" if is_sub else None),
                                anchor="e", width=200)
-            lbl.grid(row=i, column=0, padx=(12, 6), pady=3 if is_sub else 5, sticky="e")
+            lbl.grid(row=i, column=0, padx=(12, 6),
+                     pady=3 if is_sub else 5, sticky="e")
             val = ctk.CTkLabel(frame, text="—",
-                               font=("Consolas", 11 if is_sub else 12), anchor="w",
-                               wraplength=600)
-            val.grid(row=i, column=1, padx=(4, 12), pady=3 if is_sub else 5, sticky="w")
+                               font=("Consolas", 11 if is_sub else 12),
+                               anchor="w", wraplength=600)
+            val.grid(row=i, column=1, padx=(4, 12),
+                     pady=3 if is_sub else 5, sticky="w")
             self._bind_label_copy_menu(val)
             self._summary_labels.append((lbl, val))
 
         self._tf_info_lbl = ctk.CTkLabel(
-            frame, text="",
-            font=("Microsoft JhengHei", 11), anchor="w",
-            text_color="#ffcc55", wraplength=700)
-        self._tf_info_lbl.grid(
-            row=len(fields), column=0, columnspan=2,
-            padx=12, pady=(4, 8), sticky="w")
+            frame, text="", font=("Microsoft JhengHei", 11),
+            anchor="w", text_color="#ffcc55", wraplength=700)
+        self._tf_info_lbl.grid(row=len(fields), column=0, columnspan=2,
+                               padx=12, pady=(4, 8), sticky="w")
 
     def _build_approvals_tab(self):
         tab = self._profile_tabs.tab("授權對象")
@@ -400,32 +1072,14 @@ class App(ctk.CTk):
         tree = self._make_treeview(frame, ("請先執行分析",))
         setattr(self, attr, tree)
 
-    # ═══════════════════════════════════════════════════════════════════════════
-    # 幣流關聯圖頁
-    # ═══════════════════════════════════════════════════════════════════════════
+    # ── Hash 分析分頁 ─────────────────────────────────────────────────────────
 
-    def _build_flow_page(self):
-        page = ctk.CTkFrame(self._content, corner_radius=10)
-        self._pages["flow"] = page
-        page.grid_columnconfigure(0, weight=1)
-        page.grid_rowconfigure(0, weight=1)
+    def _build_hash_tab(self, parent: ctk.CTkFrame):
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_rowconfigure(1, weight=1)
 
-        self._flow_panel = FlowGraphPanel(page)
-        self._flow_panel.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
-        self._flow_panel.set_node_click_callback(self._on_flow_node_clicked)
-
-    # ═══════════════════════════════════════════════════════════════════════════
-    # Hash 分析頁
-    # ═══════════════════════════════════════════════════════════════════════════
-
-    def _build_hash_page(self):
-        page = ctk.CTkFrame(self._content, corner_radius=10)
-        self._pages["hash"] = page
-        page.grid_columnconfigure(0, weight=1)
-        page.grid_rowconfigure(1, weight=1)
-
-        input_frame = ctk.CTkFrame(page, corner_radius=8)
-        input_frame.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 4))
+        input_frame = ctk.CTkFrame(parent, corner_radius=8)
+        input_frame.grid(row=0, column=0, sticky="ew", padx=4, pady=(4, 2))
         input_frame.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(input_frame, text="交易 Hash：",
@@ -446,15 +1100,14 @@ class App(ctk.CTk):
                           values=["ETH", "TRX", "BTC"], width=80,
                           font=("Microsoft JhengHei", 11)).grid(
             row=0, column=3, padx=2, pady=8)
-
         self.hash_btn = ctk.CTkButton(
             input_frame, text="查詢", width=90,
             font=("Microsoft JhengHei", 12, "bold"),
             command=self._start_hash_analysis)
         self.hash_btn.grid(row=0, column=4, padx=(4, 12), pady=8)
 
-        result_frame = ctk.CTkFrame(page, corner_radius=8)
-        result_frame.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        result_frame = ctk.CTkFrame(parent, corner_radius=8)
+        result_frame.grid(row=1, column=0, sticky="nsew", padx=4, pady=(0, 4))
         result_frame.grid_columnconfigure(0, weight=1)
         result_frame.grid_rowconfigure(1, weight=1)
 
@@ -471,22 +1124,30 @@ class App(ctk.CTk):
         ctk.CTkLabel(token_frame, text="Token 轉帳明細",
                      font=("Microsoft JhengHei", 11, "bold")).grid(
             row=0, column=0, sticky="w", padx=8, pady=4)
-        cols = ("Token", "從", "至", "金額", "合約")
-        self._hash_token_tree = self._make_treeview(token_frame, cols)
+        self._hash_token_tree = self._make_treeview(
+            token_frame, ("Token", "從", "至", "金額", "合約"))
         self._hash_token_tree.grid(row=1, column=0, sticky="nsew")
 
-    # ═══════════════════════════════════════════════════════════════════════════
-    # 查詢歷史頁
-    # ═══════════════════════════════════════════════════════════════════════════
+    # ── 涉案錢包/帳戶分頁 ────────────────────────────────────────────────────
 
-    def _build_history_page(self):
-        page = ctk.CTkFrame(self._content, corner_radius=10)
-        self._pages["history"] = page
-        page.grid_columnconfigure(0, weight=1)
-        page.grid_rowconfigure(1, weight=1)
+    def _build_addr_tab(self, parent: ctk.CTkFrame):
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_rowconfigure(0, weight=1)
+        self._addr_tab_frame = parent
+        ctk.CTkLabel(
+            parent,
+            text="請先完成步驟 3 選擇案件，此分頁將顯示涉案錢包 / 帳戶管理。",
+            font=("Microsoft JhengHei", 12), text_color="gray50").grid(
+            row=0, column=0)
 
-        bar = ctk.CTkFrame(page, corner_radius=8)
-        bar.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 4))
+    # ── 查詢歷史分頁 ──────────────────────────────────────────────────────────
+
+    def _build_history_tab(self, parent: ctk.CTkFrame):
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_rowconfigure(1, weight=1)
+
+        bar = ctk.CTkFrame(parent, corner_radius=8)
+        bar.grid(row=0, column=0, sticky="ew", padx=4, pady=(4, 2))
 
         ctk.CTkLabel(bar, text="顯示：",
                      font=("Microsoft JhengHei", 12)).pack(
@@ -496,21 +1157,16 @@ class App(ctk.CTk):
                                variable=self._hist_mode,
                                command=self._load_history).pack(
             side="left", padx=4, pady=8)
-
         ctk.CTkButton(bar, text="重新整理", width=90,
                       font=("Microsoft JhengHei", 11),
                       command=self._load_history).pack(side="left", padx=8)
-
         self._del_hist_btn = ctk.CTkButton(
             bar, text="刪除選取", width=90,
-            font=("Microsoft JhengHei", 11),
-            fg_color="#8b1a1a",
+            font=("Microsoft JhengHei", 11), fg_color="#8b1a1a",
             command=self._delete_history_row)
         self._del_hist_btn.pack(side="left", padx=4)
-
         ctk.CTkLabel(bar, text="搜尋地址/Hash：",
-                     font=("Microsoft JhengHei", 11)).pack(
-            side="left", padx=(20, 4))
+                     font=("Microsoft JhengHei", 11)).pack(side="left", padx=(20, 4))
         self._hist_search = ctk.CTkEntry(bar, width=220, font=("Consolas", 11))
         self._hist_search.pack(side="left", padx=4)
         self._bind_entry_context_menu(self._hist_search)
@@ -519,8 +1175,8 @@ class App(ctk.CTk):
                       font=("Microsoft JhengHei", 11),
                       command=self._load_history).pack(side="left", padx=4)
 
-        frame = ctk.CTkFrame(page, corner_radius=8)
-        frame.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        frame = ctk.CTkFrame(parent, corner_radius=8)
+        frame.grid(row=1, column=0, sticky="nsew", padx=4, pady=(0, 4))
         frame.grid_columnconfigure(0, weight=1)
         frame.grid_rowconfigure(0, weight=1)
 
@@ -536,402 +1192,204 @@ class App(ctk.CTk):
         self._load_history()
 
     # ═══════════════════════════════════════════════════════════════════════════
-    # 案件管理頁
+    # 頁面 5：幣流圖
     # ═══════════════════════════════════════════════════════════════════════════
 
-    def _build_case_page(self):
+    def _build_flow_page(self):
         page = ctk.CTkFrame(self._content, corner_radius=10)
-        self._pages["case"] = page
+        self._pages["flow"] = page
         page.grid_columnconfigure(0, weight=1)
         page.grid_rowconfigure(0, weight=1)
+        self._flow_panel = FlowGraphPanel(page)
+        self._flow_panel.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
+        self._flow_panel.set_node_click_callback(self._on_flow_node_clicked)
 
-        pane = ctk.CTkFrame(page, corner_radius=0, fg_color="transparent")
-        pane.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
-        pane.grid_columnconfigure(0, weight=2)
-        pane.grid_columnconfigure(1, weight=5)
-        pane.grid_rowconfigure(0, weight=1)
+    # ═══════════════════════════════════════════════════════════════════════════
+    # 頁面 6：產製報告
+    # ═══════════════════════════════════════════════════════════════════════════
 
-        # ── 左側：案件清單 ──
-        left = ctk.CTkFrame(pane, corner_radius=8)
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
+    def _build_report_page(self):
+        page = ctk.CTkFrame(self._content, corner_radius=10)
+        self._pages["report"] = page
+        page.grid_columnconfigure(0, weight=1)
+        page.grid_columnconfigure(1, weight=1)
+        page.grid_rowconfigure(1, weight=1)
+
+        # 頂部資訊列
+        top = ctk.CTkFrame(page, corner_radius=8, fg_color="#12192a")
+        top.grid(row=0, column=0, columnspan=2, sticky="ew", padx=10, pady=(10, 4))
+        top.grid_columnconfigure(1, weight=1)
+        top.grid_columnconfigure(3, weight=1)
+
+        ctk.CTkLabel(top, text="目前案件：",
+                     font=("Microsoft JhengHei", 12, "bold"),
+                     text_color="#94a3b8").grid(row=0, column=0, padx=(16, 6), pady=12)
+        self._report_case_lbl = ctk.CTkLabel(
+            top, text="尚未選擇案件",
+            font=("Microsoft JhengHei", 12), text_color="#f5a623", anchor="w")
+        self._report_case_lbl.grid(row=0, column=1, pady=12, sticky="w")
+
+        ctk.CTkLabel(top, text="輸出目錄：",
+                     font=("Microsoft JhengHei", 12, "bold"),
+                     text_color="#94a3b8").grid(row=0, column=2, padx=(20, 6), pady=12)
+        out_row = ctk.CTkFrame(top, fg_color="transparent")
+        out_row.grid(row=0, column=3, padx=(0, 16), pady=12, sticky="ew")
+        out_row.grid_columnconfigure(0, weight=1)
+        self._report_outdir_entry = ctk.CTkEntry(
+            out_row, font=("Consolas", 11),
+            placeholder_text="點擊「瀏覽」選擇輸出資料夾…")
+        self._report_outdir_entry.grid(row=0, column=0, sticky="ew")
+        self._bind_entry_context_menu(self._report_outdir_entry)
+        ctk.CTkButton(out_row, text="瀏覽", width=60,
+                      font=("Microsoft JhengHei", 11),
+                      command=self._report_browse_dir).grid(
+            row=0, column=1, padx=(6, 0))
+
+        # 左：幣流分析報告
+        left = ctk.CTkFrame(page, corner_radius=10, fg_color="#0f1520")
+        left.grid(row=1, column=0, sticky="nsew", padx=(10, 4), pady=(4, 10))
         left.grid_columnconfigure(0, weight=1)
         left.grid_rowconfigure(2, weight=1)
 
-        hdr = ctk.CTkFrame(left, fg_color="transparent")
-        hdr.grid(row=0, column=0, sticky="ew", padx=8, pady=6)
-        ctk.CTkLabel(hdr, text="案件清單",
-                     font=("Microsoft JhengHei", 13, "bold")).pack(side="left")
-        for txt, color, cmd in [
-            ("＋ 新建", "#1d6b3e", self._case_new),
-            ("✎ 編輯",  "#2a4a8a", self._case_edit),
-            ("🗑 刪除", "#7a1f1f", self._case_delete),
-        ]:
-            ctk.CTkButton(hdr, text=txt, width=68,
-                          font=("Microsoft JhengHei", 10),
-                          fg_color=color, command=cmd).pack(side="right", padx=1)
+        ctk.CTkLabel(left, text="📊  幣流分析報告",
+                     font=("Microsoft JhengHei", 15, "bold"),
+                     text_color="#60a5fa").grid(
+            row=0, column=0, padx=16, pady=(16, 4), sticky="w")
+        ctk.CTkLabel(left,
+                     text="依案件幣流資料產製「幣流分析專家意見書」Word 文件\n"
+                          "壹案件背景 → 貳資料來源 → 參幣流事實 → … → 玖附錄",
+                     font=("Microsoft JhengHei", 10),
+                     text_color="gray50", justify="left").grid(
+            row=1, column=0, padx=16, pady=(0, 8), sticky="w")
+        self._flow_report_log = ctk.CTkTextbox(
+            left, font=("Consolas", 10), fg_color="#080d14",
+            text_color="#6ee7b7", corner_radius=6, state="disabled")
+        self._flow_report_log.grid(row=2, column=0, sticky="nsew", padx=12, pady=(0, 8))
+        ctk.CTkButton(left, text="▶  產製幣流分析報告",
+                      font=("Microsoft JhengHei", 12, "bold"),
+                      fg_color="#1d4ed8", hover_color="#1e3a8a",
+                      height=42, command=self._generate_flow_report).grid(
+            row=3, column=0, padx=12, pady=(0, 16), sticky="ew")
 
-        imp_bar = ctk.CTkFrame(left, fg_color="#1a2744", corner_radius=6)
-        imp_bar.grid(row=1, column=0, sticky="ew", padx=6, pady=(0, 4))
-        imp_bar.grid_columnconfigure(1, weight=1)
-        ctk.CTkLabel(imp_bar, text="匯入案件編號：",
-                     font=("Microsoft JhengHei", 10, "bold"),
-                     text_color="#aac4ff").grid(
-            row=0, column=0, padx=(8, 4), pady=5)
-        self._import_num_entry = ctk.CTkEntry(
-            imp_bar, font=("Consolas", 10),
-            placeholder_text="CASE-YYYYMMDD-NNN")
-        self._import_num_entry.grid(row=0, column=1, padx=4, pady=5, sticky="ew")
-        ctk.CTkButton(imp_bar, text="匯入", width=60,
-                      font=("Microsoft JhengHei", 10),
-                      fg_color="#2a4a8a",
-                      command=self._import_by_case_number).grid(
-            row=0, column=2, padx=(4, 8), pady=5)
-
-        lf = ctk.CTkFrame(left, corner_radius=6)
-        lf.grid(row=2, column=0, sticky="nsew", padx=6, pady=(0, 6))
-        lf.grid_columnconfigure(0, weight=1)
-        lf.grid_rowconfigure(0, weight=1)
-        case_cols = ("案件編號", "案件名稱", "類型", "狀態", "承辦人")
-        self._case_tree = self._make_treeview(lf, case_cols)
-        for col, w in zip(case_cols, [110, 150, 60, 60, 80]):
-            self._case_tree.column(col, width=w, minwidth=50)
-        self._case_tree.bind("<<TreeviewSelect>>", self._on_case_select)
-        self._case_tree.bind("<Double-1>",
-                             lambda _: self._set_active_case_from_tree())
-
-        # ── 右側：案件詳細 ──
-        right = ctk.CTkFrame(pane, corner_radius=8)
-        right.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
+        # 右：案件分析報告
+        right = ctk.CTkFrame(page, corner_radius=10, fg_color="#0f1520")
+        right.grid(row=1, column=1, sticky="nsew", padx=(4, 10), pady=(4, 10))
         right.grid_columnconfigure(0, weight=1)
-        right.grid_rowconfigure(1, weight=1)
+        right.grid_rowconfigure(2, weight=1)
 
-        info_bar = ctk.CTkFrame(right, fg_color="transparent")
-        info_bar.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 2))
-        info_bar.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(right, text="📋  案件分析報告",
+                     font=("Microsoft JhengHei", 15, "bold"),
+                     text_color="#a78bfa").grid(
+            row=0, column=0, padx=16, pady=(16, 4), sticky="w")
+        ctk.CTkLabel(right,
+                     text="依案件基本資料產製「虛擬貨幣詐欺案件分析範本」Word 文件\n"
+                          "九大章節架構，適用於偵查報告與法庭提呈",
+                     font=("Microsoft JhengHei", 10),
+                     text_color="gray50", justify="left").grid(
+            row=1, column=0, padx=16, pady=(0, 8), sticky="w")
+        self._case_report_log = ctk.CTkTextbox(
+            right, font=("Consolas", 10), fg_color="#080d14",
+            text_color="#c4b5fd", corner_radius=6, state="disabled")
+        self._case_report_log.grid(row=2, column=0, sticky="nsew", padx=12, pady=(0, 8))
+        ctk.CTkButton(right, text="▶  產製案件分析報告",
+                      font=("Microsoft JhengHei", 12, "bold"),
+                      fg_color="#4c1d95", hover_color="#3b1a7a",
+                      height=42, command=self._generate_case_report).grid(
+            row=3, column=0, padx=12, pady=(0, 16), sticky="ew")
 
-        self._case_info_lbl = ctk.CTkLabel(
-            info_bar, text="← 點選左側案件查看詳情",
-            font=("Microsoft JhengHei", 11), text_color="gray60", anchor="w")
-        self._case_info_lbl.grid(row=0, column=0, sticky="w")
+    def _report_browse_dir(self):
+        d = filedialog.askdirectory(title="選擇報告輸出目錄")
+        if d:
+            self._report_outdir_entry.delete(0, "end")
+            self._report_outdir_entry.insert(0, d)
 
-        op_bar = ctk.CTkFrame(info_bar, fg_color="transparent")
-        op_bar.grid(row=1, column=0, sticky="w", pady=(2, 0))
-        for txt, color, cmd in [
-            ("設為目前案件",   "#1d5e8a", self._set_active_case_from_tree),
-            ("從文件匯入描述", "#4a3a7a", self._import_doc_to_desc),
-            ("移除錢包",       "gray35",  self._case_unlink_wallet),
-            ("移除 Hash",      "gray35",  self._case_unlink_hash),
-        ]:
-            ctk.CTkButton(op_bar, text=txt, width=110,
-                          font=("Microsoft JhengHei", 10),
-                          fg_color=color, command=cmd).pack(side="left", padx=2)
+    def _append_report_log(self, textbox: ctk.CTkTextbox, msg: str):
+        textbox.configure(state="normal")
+        textbox.insert("end", msg + "\n")
+        textbox.see("end")
+        textbox.configure(state="disabled")
 
-        right_tabs = ctk.CTkTabview(right, corner_radius=8)
-        right_tabs.grid(row=1, column=0, sticky="nsew", padx=4, pady=(2, 4))
-        for tname in ["關聯錢包", "關聯 Hash", "被害人陳述交易紀錄"]:
-            right_tabs.add(tname)
-        self._right_tabs = right_tabs
-
-        wt = right_tabs.tab("關聯錢包")
-        wt.grid_columnconfigure(0, weight=1)
-        wt.grid_rowconfigure(0, weight=1)
-        wf = ctk.CTkFrame(wt, corner_radius=6)
-        wf.grid(row=0, column=0, sticky="nsew")
-        wf.grid_columnconfigure(0, weight=1)
-        wf.grid_rowconfigure(0, weight=1)
-        w_cols = ("鏈", "地址", "標籤", "發起", "接受", "Token 轉帳", "分析時間")
-        self._case_wallet_tree = self._make_treeview(wf, w_cols)
-        for col, w in zip(w_cols, [50, 200, 80, 50, 50, 70, 130]):
-            self._case_wallet_tree.column(col, width=w, minwidth=40)
-
-        ht = right_tabs.tab("關聯 Hash")
-        ht.grid_columnconfigure(0, weight=1)
-        ht.grid_rowconfigure(0, weight=1)
-        hf = ctk.CTkFrame(ht, corner_radius=6)
-        hf.grid(row=0, column=0, sticky="nsew")
-        hf.grid_columnconfigure(0, weight=1)
-        hf.grid_rowconfigure(0, weight=1)
-        h_cols = ("鏈", "交易 Hash", "狀態", "發送方", "接收方", "金額", "查詢時間")
-        self._case_hash_tree = self._make_treeview(hf, h_cols)
-        for col, w in zip(h_cols, [50, 200, 60, 150, 150, 90, 130]):
-            self._case_hash_tree.column(col, width=w, minwidth=40)
-
-        self._victim_tx_panel: VictimTxPanel | None = None
-        self._victim_tx_tab_frame = right_tabs.tab("被害人陳述交易紀錄")
-        self._victim_tx_tab_frame.grid_columnconfigure(0, weight=1)
-        self._victim_tx_tab_frame.grid_rowconfigure(0, weight=1)
-        ctk.CTkLabel(
-            self._victim_tx_tab_frame,
-            text="← 請先在左側選取案件",
-            font=("Microsoft JhengHei", 12), text_color="gray60"
-        ).grid(row=0, column=0)
-
-        self._selected_case_id: int | None = None
-        self._reload_case_list()
-
-    # ═══════════════════════════════════════════════════════════════════════════
-    # 設定頁
-    # ═══════════════════════════════════════════════════════════════════════════
-
-    def _build_settings_page(self):
-        page = ctk.CTkFrame(self._content, corner_radius=10)
-        self._pages["settings"] = page
-        page.grid_columnconfigure(0, weight=1)
-        page.grid_rowconfigure(3, weight=1)
-
-        ctk.CTkLabel(page, text="⚙  設定",
-                     font=("Microsoft JhengHei", 16, "bold")).grid(
-            row=0, column=0, padx=28, pady=(24, 16), sticky="w")
-
-        inner = ctk.CTkFrame(page, corner_radius=8, fg_color="#1e2235")
-        inner.grid(row=1, column=0, padx=28, pady=8, sticky="ew")
-        inner.grid_columnconfigure(1, weight=1)
-
-        ctk.CTkLabel(inner, text="Etherscan API Key：",
-                     font=("Microsoft JhengHei", 12)).grid(
-            row=0, column=0, padx=(16, 8), pady=(20, 10), sticky="e")
-        self._settings_eth_entry = ctk.CTkEntry(inner, width=420, font=("Consolas", 11))
-        self._settings_eth_entry.insert(0, self.config_data.get("etherscan_api_key", ""))
-        self._settings_eth_entry.grid(row=0, column=1, padx=(0, 16), pady=(20, 10), sticky="ew")
-        self._bind_entry_context_menu(self._settings_eth_entry)
-
-        ctk.CTkLabel(inner, text="TronGrid API Key（選填）：",
-                     font=("Microsoft JhengHei", 12)).grid(
-            row=1, column=0, padx=(16, 8), pady=(0, 20), sticky="e")
-        self._settings_trx_entry = ctk.CTkEntry(inner, width=420, font=("Consolas", 11))
-        self._settings_trx_entry.insert(0, self.config_data.get("trongrid_api_key", ""))
-        self._settings_trx_entry.grid(row=1, column=1, padx=(0, 16), pady=(0, 20), sticky="ew")
-        self._bind_entry_context_menu(self._settings_trx_entry)
-
-        ctk.CTkButton(page, text="儲存設定",
-                      font=("Microsoft JhengHei", 13, "bold"),
-                      width=140, fg_color="#1d6b3e",
-                      command=self._save_settings).grid(
-            row=2, column=0, padx=28, pady=12, sticky="w")
-
-    def _save_settings(self):
-        self.config_data["etherscan_api_key"] = self._settings_eth_entry.get().strip()
-        self.config_data["trongrid_api_key"]  = self._settings_trx_entry.get().strip()
-        save_config(self.config_data)
-        self.status_var.set("設定已儲存")
-        messagebox.showinfo("已儲存", "設定已儲存")
-
-    # ═══════════════════════════════════════════════════════════════════════════
-    # 案件管理方法
-    # ═══════════════════════════════════════════════════════════════════════════
-
-    def _reload_case_list(self):
-        for iid in self._case_tree.get_children():
-            self._case_tree.delete(iid)
-        for c in _db.get_all_cases():
-            self._case_tree.insert("", "end", iid=str(c["id"]), values=(
-                c.get("case_number",""), c.get("case_name",""),
-                c.get("case_type",""), c.get("status",""),
-                c.get("investigator",""),
-            ))
-
-    def _on_case_select(self, _event=None):
-        sel = self._case_tree.selection()
-        if not sel:
+    def _generate_flow_report(self):
+        if not self._active_case:
+            messagebox.showinfo("請先選擇案件", "請先在步驟 3 選擇案件後再產製報告。")
             return
-        case_id = int(sel[0])
-        self._selected_case_id = case_id
-        case = _db.get_case(case_id)
-        if not case:
+        out_dir = self._report_outdir_entry.get().strip()
+        if not out_dir:
+            messagebox.showwarning("缺少輸出目錄", "請先選擇報告輸出目錄。")
             return
-        self._case_info_lbl.configure(
-            text=f"【{case['case_number']}】{case['case_name']}　"
-                 f"類型：{case['case_type']}　狀態：{case['status']}　"
-                 f"承辦：{case.get('investigator','—')}　"
-                 f"建立：{case.get('created_at','')}"
-        )
-        for iid in self._case_wallet_tree.get_children():
-            self._case_wallet_tree.delete(iid)
-        for w in _db.get_case_wallets(case_id):
-            self._case_wallet_tree.insert("", "end", iid=str(w["id"]), values=(
-                w.get("chain",""), w.get("address",""),
-                w.get("label",""), w.get("out_count",0),
-                w.get("in_count",0), w.get("token_transfer_count",0),
-                w.get("analyzed_at",""),
-            ))
-        for iid in self._case_hash_tree.get_children():
-            self._case_hash_tree.delete(iid)
-        for h in _db.get_case_tx_lookups(case_id):
-            self._case_hash_tree.insert("", "end", iid=str(h["id"]), values=(
-                h.get("chain",""), h.get("tx_hash",""),
-                h.get("status",""), h.get("from_addr",""),
-                h.get("to_addr",""), h.get("value_str",""),
-                h.get("queried_at",""),
-            ))
-        if self._victim_tx_panel is None:
-            for w in self._victim_tx_tab_frame.winfo_children():
-                w.destroy()
-            self._victim_tx_panel = VictimTxPanel(
-                self._victim_tx_tab_frame, case_id)
-            self._victim_tx_panel.grid(row=0, column=0, sticky="nsew")
-        else:
-            self._victim_tx_panel.set_case(case_id)
+        import os
+        case = self._active_case
+        op   = self.config_data.get("operator", {})
+        ts   = datetime.datetime.now().strftime("%Y%m%d%H%M")
+        fname = f"幣流分析報告_{case['case_number']}_{ts}.docx"
+        out_path = os.path.join(out_dir, fname)
 
-    def _set_active_case_from_tree(self, _event=None):
-        if not self._selected_case_id:
-            messagebox.showinfo("提示", "請先在左側選取一個案件")
+        self._append_report_log(self._flow_report_log,
+            f"[{datetime.datetime.now().strftime('%H:%M:%S')}] 開始產製幣流分析報告…")
+        self._append_report_log(self._flow_report_log,
+            f"  案件：{case['case_number']} {case['case_name']}")
+        self._append_report_log(self._flow_report_log,
+            f"  分析人員：{op.get('identity_name','—')} ({op.get('identity_id','—')})")
+
+        def do_gen():
+            try:
+                from exporter.flow_report_builder import build_flow_report
+                data = {
+                    "case_number":  case.get("case_number", ""),
+                    "case_name":    case.get("case_name", ""),
+                    "investigator": op.get("identity_name", ""),
+                    "unit":         op.get("identity_unit", ""),
+                    "report_date":  datetime.datetime.now().strftime("%Y年%m月%d日"),
+                }
+                build_flow_report(data, out_path)
+                self.after(0, self._append_report_log, self._flow_report_log,
+                           f"  ✔ 完成：{out_path}")
+                self.after(0, self.status_var.set, f"幣流報告已產製：{fname}")
+            except Exception as e:
+                self.after(0, self._append_report_log, self._flow_report_log,
+                           f"  ✘ 錯誤：{e}")
+        threading.Thread(target=do_gen, daemon=True).start()
+
+    def _generate_case_report(self):
+        if not self._active_case:
+            messagebox.showinfo("請先選擇案件", "請先在步驟 3 選擇案件後再產製報告。")
             return
-        case = _db.get_case(self._selected_case_id)
-        if case:
-            self._active_case = case
-            self._case_label.configure(
-                text=f"【{case['case_number']}】{case['case_name']}  "
-                     f"（{case['case_type']} · {case['status']}）",
-                text_color="#7eb8f7")
-            self.status_var.set(
-                f"目前案件已設為：{case['case_number']} {case['case_name']}")
-
-    def _import_by_case_number(self):
-        num = self._import_num_entry.get().strip()
-        if not num:
-            messagebox.showwarning("缺少輸入", "請輸入案件編號")
+        out_dir = self._report_outdir_entry.get().strip()
+        if not out_dir:
+            messagebox.showwarning("缺少輸出目錄", "請先選擇報告輸出目錄。")
             return
-        case = _db.get_case_by_number(num)
-        if not case:
-            messagebox.showerror("找不到案件",
-                                 f"找不到案件編號：{num}\n請確認編號是否正確。")
-            return
-        iid = str(case["id"])
-        if iid in self._case_tree.get_children():
-            self._case_tree.selection_set(iid)
-            self._case_tree.see(iid)
-            self._on_case_select()
-        self._import_num_entry.delete(0, "end")
-        self.status_var.set(f"已匯入案件：{case['case_number']} {case['case_name']}")
+        import os
+        case = self._active_case
+        op   = self.config_data.get("operator", {})
+        ts   = datetime.datetime.now().strftime("%Y%m%d%H%M")
+        fname = f"案件分析報告_{case['case_number']}_{ts}.docx"
+        out_path = os.path.join(out_dir, fname)
 
-    def _import_doc_to_desc(self):
-        if not self._selected_case_id:
-            messagebox.showinfo("提示", "請先選取案件")
-            return
-        folder = filedialog.askdirectory(title="選擇文件資料夾")
-        if not folder:
-            return
-        self.status_var.set("正在分析資料夾內文件，請稍候…")
-        self.update_idletasks()
+        self._append_report_log(self._case_report_log,
+            f"[{datetime.datetime.now().strftime('%H:%M:%S')}] 開始產製案件分析報告…")
+        self._append_report_log(self._case_report_log,
+            f"  案件：{case['case_number']} {case['case_name']}")
 
-        def do_import():
-            from analyzer.doc_transaction_extractor import (
-                analyze_folder, summarize_for_case)
-            result  = analyze_folder(folder)
-            summary = summarize_for_case(result["raw_text"])
-            case    = _db.get_case(self._selected_case_id)
-            old_desc = case.get("description", "") or ""
-            new_desc = (old_desc + "\n\n【文件分析摘要】\n" + summary
-                        if old_desc else "【文件分析摘要】\n" + summary)
-            _db.update_case(self._selected_case_id, description=new_desc)
-            imported = 0
-            for t in result["transactions"]:
-                _db.upsert_victim_transaction(self._selected_case_id, t)
-                imported += 1
-            proc = len(result["processed_files"])
-            err  = len(result["error_files"])
-            self.after(0, self._finish_doc_import, proc, err, imported)
-
-        threading.Thread(target=do_import, daemon=True).start()
-
-    def _finish_doc_import(self, processed, errors, imported):
-        self._reload_case_list()
-        self._on_case_select()
-        if self._victim_tx_panel:
-            self._victim_tx_panel._load()
-        self.status_var.set(
-            f"文件分析完成：處理 {processed} 份，錯誤 {errors} 份，"
-            f"匯入 {imported} 筆交易記錄")
-        messagebox.showinfo("匯入完成",
-                            f"已處理 {processed} 份文件（{errors} 份失敗）\n"
-                            f"案件描述已更新\n"
-                            f"交易記錄匯入 {imported} 筆（請逐一確認修正）")
-
-    def _case_new(self):
-        def on_save(c):
-            self._reload_case_list()
-        CaseDialog(self, on_save=on_save)
-
-    def _case_edit(self):
-        sel = self._case_tree.selection()
-        if not sel:
-            messagebox.showinfo("提示", "請先選取要編輯的案件")
-            return
-        case = _db.get_case(int(sel[0]))
-        if case:
-            def on_save(_):
-                self._reload_case_list()
-                self._on_case_select()
-            CaseDialog(self, case=case, on_save=on_save)
-
-    def _case_delete(self):
-        sel = self._case_tree.selection()
-        if not sel:
-            messagebox.showinfo("提示", "請先選取要刪除的案件")
-            return
-        case = _db.get_case(int(sel[0]))
-        if not case:
-            return
-        if not messagebox.askyesno(
-                "確認刪除",
-                f"確定刪除案件【{case['case_number']}】{case['case_name']}？\n"
-                "（關聯的錢包與 Hash 記錄不會被刪除，僅解除關聯）"):
-            return
-        _db.delete_case(int(sel[0]))
-        if self._active_case and self._active_case["id"] == int(sel[0]):
-            self._clear_case()
-        self._reload_case_list()
-        self._case_info_lbl.configure(text="← 點選左側案件查看詳情")
-
-    def _case_unlink_wallet(self):
-        sel = self._case_wallet_tree.selection()
-        if not sel:
-            messagebox.showinfo("提示", "請先選取要移除的錢包")
-            return
-        for iid in sel:
-            _db.unlink_wallet_from_case(int(iid))
-        self._on_case_select()
-
-    def _case_unlink_hash(self):
-        sel = self._case_hash_tree.selection()
-        if not sel:
-            messagebox.showinfo("提示", "請先選取要移除的 Hash 記錄")
-            return
-        for iid in sel:
-            _db.unlink_tx_lookup_from_case(int(iid))
-        self._on_case_select()
-
-    # ── 頂部案件控制 ────────────────────────────────────────────────────────────
-
-    def _pick_case(self):
-        def on_select(case):
-            self._active_case = case
-            self._case_label.configure(
-                text=f"【{case['case_number']}】{case['case_name']}  "
-                     f"（{case['case_type']} · {case['status']}）",
-                text_color="#7eb8f7")
-            self.status_var.set(
-                f"已切換案件：{case['case_number']} {case['case_name']}")
-            self._flow_panel.set_case_id(case["id"])
-        LinkToCaseDialog(self, title="選擇目前作業案件", on_select=on_select)
-
-    def _new_case_quick(self):
-        def on_save(c):
-            self._active_case = c
-            self._case_label.configure(
-                text=f"【{c['case_number']}】{c['case_name']}  "
-                     f"（{c['case_type']} · {c['status']}）",
-                text_color="#7eb8f7")
-            self._reload_case_list()
-            self.status_var.set(f"新建案件：{c['case_number']} {c['case_name']}")
-            self._flow_panel.set_case_id(c["id"])
-        CaseDialog(self, on_save=on_save)
-
-    def _clear_case(self):
-        self._active_case = None
-        self._case_label.configure(text="（未選擇案件）", text_color="#f5a623")
-        self.status_var.set("已清除案件選擇")
-        self._flow_panel.set_case_id(None)
+        def do_gen():
+            try:
+                from exporter.case_template_builder import build_case_doc
+                data = {
+                    "case_number":  case.get("case_number", ""),
+                    "case_name":    case.get("case_name", ""),
+                    "case_type":    case.get("case_type", ""),
+                    "investigator": op.get("identity_name", ""),
+                    "unit":         op.get("identity_unit", ""),
+                    "description":  case.get("description", ""),
+                    "report_date":  datetime.datetime.now().strftime("%Y年%m月%d日"),
+                }
+                build_case_doc(data, out_path)
+                self.after(0, self._append_report_log, self._case_report_log,
+                           f"  ✔ 完成：{out_path}")
+                self.after(0, self.status_var.set, f"案件報告已產製：{fname}")
+            except Exception as e:
+                self.after(0, self._append_report_log, self._case_report_log,
+                           f"  ✘ 錯誤：{e}")
+        threading.Thread(target=do_gen, daemon=True).start()
 
     # ═══════════════════════════════════════════════════════════════════════════
     # Treeview 與右鍵選單
@@ -947,17 +1405,15 @@ class App(ctk.CTk):
                         foreground="white", font=("Microsoft JhengHei", 10, "bold"))
         style.map("Treeview", background=[("selected", "#1f538d")])
 
-        vsb = ttk.Scrollbar(parent, orient="vertical")
-        hsb = ttk.Scrollbar(parent, orient="horizontal")
+        vsb  = ttk.Scrollbar(parent, orient="vertical")
+        hsb  = ttk.Scrollbar(parent, orient="horizontal")
         tree = ttk.Treeview(parent, columns=columns, show="headings",
                             yscrollcommand=vsb.set, xscrollcommand=hsb.set)
         vsb.config(command=tree.yview)
         hsb.config(command=tree.xview)
-
         for col in columns:
             tree.heading(col, text=col)
             tree.column(col, width=160, minwidth=80, stretch=True)
-
         tree.grid(row=0, column=0, sticky="nsew")
         vsb.grid(row=0, column=1, sticky="ns")
         hsb.grid(row=1, column=0, sticky="ew")
@@ -968,15 +1424,12 @@ class App(ctk.CTk):
 
     def _bind_entry_context_menu(self, widget):
         inner = widget._entry if hasattr(widget, "_entry") else widget
-        menu = tk.Menu(inner, tearoff=0,
-                       bg="#2b2b2b", fg="white", activebackground="#1f538d",
-                       activeforeground="white", font=("Microsoft JhengHei", 11))
-        menu.add_command(label="複製",
-                         command=lambda: inner.event_generate("<<Copy>>"))
-        menu.add_command(label="貼上",
-                         command=lambda: inner.event_generate("<<Paste>>"))
-        menu.add_command(label="剪下",
-                         command=lambda: inner.event_generate("<<Cut>>"))
+        menu  = tk.Menu(inner, tearoff=0, bg="#2b2b2b", fg="white",
+                        activebackground="#1f538d", activeforeground="white",
+                        font=("Microsoft JhengHei", 11))
+        menu.add_command(label="複製", command=lambda: inner.event_generate("<<Copy>>"))
+        menu.add_command(label="貼上", command=lambda: inner.event_generate("<<Paste>>"))
+        menu.add_command(label="剪下", command=lambda: inner.event_generate("<<Cut>>"))
         menu.add_separator()
         menu.add_command(label="全選",
                          command=lambda: (inner.select_range(0, "end"),
@@ -984,9 +1437,9 @@ class App(ctk.CTk):
         inner.bind("<Button-3>", lambda e: menu.tk_popup(e.x_root, e.y_root))
 
     def _bind_tree_context_menu(self, tree: ttk.Treeview):
-        menu = tk.Menu(tree, tearoff=0,
-                       bg="#2b2b2b", fg="white", activebackground="#1f538d",
-                       activeforeground="white", font=("Microsoft JhengHei", 11))
+        menu = tk.Menu(tree, tearoff=0, bg="#2b2b2b", fg="white",
+                       activebackground="#1f538d", activeforeground="white",
+                       font=("Microsoft JhengHei", 11))
         self._tree_ctx_col: str = ""
 
         def copy_cell():
@@ -1044,9 +1497,9 @@ class App(ctk.CTk):
         tree.bind("<Button-3>", show)
 
     def _bind_label_copy_menu(self, label: ctk.CTkLabel):
-        menu = tk.Menu(label, tearoff=0,
-                       bg="#2b2b2b", fg="white", activebackground="#1f538d",
-                       activeforeground="white", font=("Microsoft JhengHei", 11))
+        menu = tk.Menu(label, tearoff=0, bg="#2b2b2b", fg="white",
+                       activebackground="#1f538d", activeforeground="white",
+                       font=("Microsoft JhengHei", 11))
         menu.add_command(label="複製", command=lambda: (
             self.clipboard_clear(),
             self.clipboard_append(label.cget("text")),
@@ -1055,13 +1508,12 @@ class App(ctk.CTk):
         label.bind("<Button-3>", lambda e: menu.tk_popup(e.x_root, e.y_root))
 
     # ═══════════════════════════════════════════════════════════════════════════
-    # 查詢歷史方法
+    # 查詢歷史
     # ═══════════════════════════════════════════════════════════════════════════
 
     def _load_history(self, _=None):
         mode = self._hist_mode.get()
         kw   = self._hist_search.get().strip() if hasattr(self, "_hist_search") else ""
-
         if mode == "錢包分析":
             self._hist_hash_tree.grid_remove()
             self._hist_wallet_tree.grid(row=0, column=0, sticky="nsew")
@@ -1126,13 +1578,12 @@ class App(ctk.CTk):
 
     def _on_mode_change(self, mode: str):
         if mode == "專案查詢" and not self._active_case:
-            self._case_label.configure(
-                text="（尚未選擇案件，專案查詢需先選擇案件）",
-                text_color="#f5a623")
-        self.status_var.set(
-            f"已切換為【{mode}】模式" + (
-                "（結果不儲存至資料庫）" if mode == "一般查詢"
-                else "（結果將儲存並關聯案件）"))
+            self.status_var.set("⚠ 專案查詢需先選擇案件（步驟 3）")
+        else:
+            self.status_var.set(
+                f"已切換為【{mode}】模式" + (
+                    "（結果不儲存至資料庫）" if mode == "一般查詢"
+                    else "（結果將儲存並關聯案件）"))
 
     def _start_smart_query(self):
         text = self.addr_entry.get().strip()
@@ -1143,17 +1594,17 @@ class App(ctk.CTk):
             if not messagebox.askyesno(
                     "尚未選擇案件",
                     "專案查詢需要先選擇案件。\n\n"
-                    "是否現在選擇案件？\n"
+                    "是否現在前往步驟 3 選擇案件？\n"
                     "（選「否」將改以一般查詢執行，結果不儲存）"):
                 self._query_mode.set("一般查詢")
                 self._on_mode_change("一般查詢")
             else:
-                self._pick_case()
+                self._show_step(2)
                 return
         if self._is_tx_hash(text):
             self.hash_entry.delete(0, "end")
             self.hash_entry.insert(0, text)
-            self._show_page("hash")
+            self._show_case_data_tab("🔗  Hash 分析")
             self._start_hash_analysis()
         else:
             self._start_analysis()
@@ -1278,7 +1729,7 @@ class App(ctk.CTk):
                 raw    = api.get_transaction(tx_hash)
                 result = analyze_eth_tx(raw)
             elif chain == "TRX":
-                api    = TronScanAPI()
+                api    = TronScanAPI(self.config_data.get("trongrid_api_key", ""))
                 raw    = api.get_transaction(tx_hash)
                 result = analyze_trx_tx(raw)
             else:
@@ -1305,8 +1756,7 @@ class App(ctk.CTk):
         self.progress.stop()
         self.progress.grid_remove()
         self.hash_btn.configure(state="normal")
-
-        self._show_page("hash")
+        self._show_case_data_tab("🔗  Hash 分析")
 
         for w in self._hash_detail_frame.winfo_children():
             w.destroy()
@@ -1350,14 +1800,13 @@ class App(ctk.CTk):
 
         mode = self._query_mode.get()
         if mode == "一般查詢":
-            saved_hint = "【一般查詢－未儲存，清除後消失】"
+            saved_hint = "【一般查詢－未儲存】"
         else:
             case_hint = (f"已存入【{self._active_case['case_number']}】"
                          if self._active_case else "已儲存（未關聯案件）")
             saved_hint = f"【專案查詢－{case_hint}】"
         self.status_var.set(
-            f"Hash 查詢完成｜{result.get('chain','')} {result.get('狀態','')}　{saved_hint}"
-        )
+            f"Hash 查詢完成｜{result.get('chain','')} {result.get('狀態','')}　{saved_hint}")
 
     # ═══════════════════════════════════════════════════════════════════════════
     # 錢包分析
@@ -1369,31 +1818,26 @@ class App(ctk.CTk):
             messagebox.showwarning("缺少輸入", "請輸入錢包地址")
             return
         chain = self.chain_var.get()
-
         detected = self._detect_chain(address)
         if detected and detected != chain:
             ans = messagebox.askyesno(
                 "地址格式不符",
-                f"您選擇的是 {chain}，但輸入的地址格式像是 {detected} 地址。\n\n"
+                f"您選擇的是 {chain}，但輸入地址格式像是 {detected}。\n\n"
                 f"是否自動切換為 {detected} 並繼續？")
             if ans:
                 self.chain_var.set(detected)
                 chain = detected
             else:
                 return
-
         err = self._validate_address(chain, address)
         if err:
             messagebox.showerror("地址格式錯誤", err)
             return
-
         if chain == "ETH" and not self.config_data.get("etherscan_api_key"):
             messagebox.showwarning("缺少 API Key",
-                                   "請先在側欄「設定」中填入 Etherscan API Key")
+                                   "請先在右上角「⚙ 設定」中填入 Etherscan API Key")
             return
-
         tf = self._get_time_filter()
-
         self.analyze_btn.configure(state="disabled")
         self.status_var.set("分析中，請稍候...")
         self.progress.grid()
@@ -1408,27 +1852,25 @@ class App(ctk.CTk):
                 api = EtherscanAPI(self.config_data["etherscan_api_key"])
                 ver = "V2" if api._use_v2 else "V1"
                 self._set_status(f"使用 Etherscan {ver} API，正在抓取 ETH 一般交易...")
-                txs      = api.get_normal_transactions(address)
+                txs       = api.get_normal_transactions(address)
                 self._set_status("正在抓取 Internal 交易...")
-                int_txs  = api.get_internal_transactions(address)
+                int_txs   = api.get_internal_transactions(address)
                 self._set_status("正在抓取 ERC-20 轉帳記錄...")
-                erc20    = api.get_erc20_transfers(address)
+                erc20     = api.get_erc20_transfers(address)
                 self._set_status("正在分析授權紀錄...")
                 approvals = api.get_token_approvals(txs, address)
-                profile  = profile_eth(address, txs, int_txs, erc20, approvals)
-
+                profile   = profile_eth(address, txs, int_txs, erc20, approvals)
             elif chain == "TRX":
-                api = TronScanAPI()
+                api = TronScanAPI(self.config_data.get("trongrid_api_key", ""))
                 self._set_status("正在抓取 TRX 交易資料...")
                 s_ts = tf["start_ts"] if tf and tf["mode"] == "range" else None
                 e_ts = tf["end_ts"]   if tf and tf["mode"] == "range" else None
-                txs      = api.get_transactions(address, start_ts=s_ts, end_ts=e_ts)
+                txs       = api.get_transactions(address, start_ts=s_ts, end_ts=e_ts)
                 self._set_status("正在抓取 TRC-20 轉帳...")
-                trc20    = api.get_trc20_transfers(address, start_ts=s_ts, end_ts=e_ts)
+                trc20     = api.get_trc20_transfers(address, start_ts=s_ts, end_ts=e_ts)
                 self._set_status("正在分析授權紀錄...")
                 approvals = api.get_token_approvals(txs, address)
-                profile  = profile_trx(address, txs, trc20, approvals)
-
+                profile   = profile_trx(address, txs, trc20, approvals)
             else:
                 api = BitcoinAPI()
                 self._set_status("正在抓取 BTC 交易資料...")
@@ -1482,7 +1924,6 @@ class App(ctk.CTk):
                 f"範圍篩選 {ts_to_str(tf['start_ts'])} ～ {ts_to_str(tf['end_ts'])}，"
                 f"共 {len(filtered_raw)+len(filtered_erc)+len(filtered_trc)} 筆"
             )
-
         else:
             res = filter_centered(all_txs, chain, tf["start_ts"], tf["each_side"])
             sug = suggest_increase(tf["each_side"],
@@ -1502,7 +1943,6 @@ class App(ctk.CTk):
                         MAX_TOTAL // 2)
                     res = filter_centered(all_txs, chain, tf["start_ts"], new_each)
                     tf["each_side"] = new_each
-
             pivot  = res.get("pivot_tx") or {}
             raw_ts = (pivot.get("timeStamp") or pivot.get("timestamp") or
                       pivot.get("time") or 0)
@@ -1556,61 +1996,45 @@ class App(ctk.CTk):
 
         if chain == "ETH":
             values = [
-                chain,
-                p.get("address", ""),
-                p.get("first_tx_time", "N/A"),
-                p.get("last_tx_time",  "N/A"),
-                p.get("first_source",  "N/A"),
-                str(p.get("out_count", 0)),
-                str(p.get("eth_out_count",  0)),
-                str(p.get("erc20_out_count", 0)),
-                f"{p.get('out_total_eth', 0):,.8f} ETH",
-                _fmt_token_dict(p.get("erc20_out_by_token", {})),
-                str(p.get("in_count", 0)),
-                str(p.get("eth_in_count",   0)),
-                str(p.get("erc20_in_count",  0)),
-                f"{p.get('in_total_eth', 0):,.8f} ETH",
-                _fmt_token_dict(p.get("erc20_in_by_token", {})),
-                f"{p.get('total_fee_eth', 0):,.8f} ETH",
-                p.get("top_fee_dest", "N/A"),
+                chain, p.get("address",""),
+                p.get("first_tx_time","N/A"), p.get("last_tx_time","N/A"),
+                p.get("first_source","N/A"),
+                str(p.get("out_count",0)),
+                str(p.get("eth_out_count",0)), str(p.get("erc20_out_count",0)),
+                f"{p.get('out_total_eth',0):,.8f} ETH",
+                _fmt_token_dict(p.get("erc20_out_by_token",{})),
+                str(p.get("in_count",0)),
+                str(p.get("eth_in_count",0)), str(p.get("erc20_in_count",0)),
+                f"{p.get('in_total_eth',0):,.8f} ETH",
+                _fmt_token_dict(p.get("erc20_in_by_token",{})),
+                f"{p.get('total_fee_eth',0):,.8f} ETH",
+                p.get("top_fee_dest","N/A"),
             ]
         elif chain == "TRX":
-            out_val   = f"{p.get(amt_key, 0):,.6f} TRX"
-            in_val    = f"{p.get(in_key,  0):,.6f} TRX"
-            fee_val   = f"{p.get(fee_key, 0):,.6f} TRX"
             trc20_out = p.get("trc20_out_by_token", {})
             trc20_in  = p.get("trc20_in_by_token",  {})
             values = [
-                chain,
-                p.get("address", ""),
-                p.get("first_tx_time", "N/A"),
-                p.get("last_tx_time",  "N/A"),
-                p.get("first_source",  "N/A"),
-                str(p.get("out_count", 0)),
-                str(p.get("trx_out_count", 0)),
-                str(p.get("trc20_out_count", 0)),
-                out_val, _fmt_token_dict(trc20_out),
-                str(p.get("in_count", 0)),
-                str(p.get("trx_in_count", 0)),
-                str(p.get("trc20_in_count", 0)),
-                in_val, _fmt_token_dict(trc20_in),
-                fee_val, p.get("top_fee_dest", "N/A"),
+                chain, p.get("address",""),
+                p.get("first_tx_time","N/A"), p.get("last_tx_time","N/A"),
+                p.get("first_source","N/A"),
+                str(p.get("out_count",0)),
+                str(p.get("trx_out_count",0)), str(p.get("trc20_out_count",0)),
+                f"{p.get(amt_key,0):,.6f} TRX", _fmt_token_dict(trc20_out),
+                str(p.get("in_count",0)),
+                str(p.get("trx_in_count",0)), str(p.get("trc20_in_count",0)),
+                f"{p.get(in_key,0):,.6f} TRX", _fmt_token_dict(trc20_in),
+                f"{p.get(fee_key,0):,.6f} TRX", p.get("top_fee_dest","N/A"),
             ]
         else:
-            out_val   = f"{p.get(amt_key, 0):,.8f} {unit}"
-            in_val    = f"{p.get(in_key,  0):,.8f} {unit}"
-            fee_val   = f"{p.get(fee_key, 0):,.8f} {unit}"
             values = [
-                chain,
-                p.get("address", ""),
-                p.get("first_tx_time", "N/A"),
-                p.get("last_tx_time",  "N/A"),
-                p.get("first_source",  "N/A"),
-                str(p.get("out_count", 0)), "—", "—",
-                out_val, "—",
-                str(p.get("in_count", 0)), "—", "—",
-                in_val, "—",
-                fee_val, p.get("top_fee_dest", "N/A"),
+                chain, p.get("address",""),
+                p.get("first_tx_time","N/A"), p.get("last_tx_time","N/A"),
+                p.get("first_source","N/A"),
+                str(p.get("out_count",0)), "—", "—",
+                f"{p.get(amt_key,0):,.8f} {unit}", "—",
+                str(p.get("in_count",0)), "—", "—",
+                f"{p.get(in_key,0):,.8f} {unit}", "—",
+                f"{p.get(fee_key,0):,.8f} {unit}", p.get("top_fee_dest","N/A"),
             ]
 
         for (_, val_lbl), val in zip(self._summary_labels, values):
@@ -1626,47 +2050,40 @@ class App(ctk.CTk):
             self._approval_tree.delete(row)
         for a in p.get("approval_targets", []):
             self._approval_tree.insert("", "end", values=(
-                a.get("contract",""),
-                a.get("spender",""),
-                a.get("tx_hash", a.get("amount","")),
-                a.get("time",""),
+                a.get("contract",""), a.get("spender",""),
+                a.get("tx_hash", a.get("amount","")), a.get("time",""),
             ))
 
         self._rebuild_tree("_tx_tree", p.get("raw_txs", []))
         token_data = p.get("raw_erc20", p.get("raw_trc20", []))
         self._rebuild_tree("_token_tree", token_data)
 
-        total = p.get("out_count", 0) + p.get("in_count", 0)
+        total    = p.get("out_count",0) + p.get("in_count",0)
         has_data = bool(p.get("raw_txs") or p.get("raw_erc20") or p.get("raw_trc20"))
         if total == 0 and not has_data:
-            addr = p.get("address", "")
+            addr = p.get("address","")
             explorer = {
                 "ETH": f"https://etherscan.io/address/{addr}",
                 "TRX": f"https://tronscan.org/#/address/{addr}",
                 "BTC": f"https://blockchain.com/btc/address/{addr}",
             }.get(chain, "")
-            messagebox.showwarning(
-                "查無交易記錄",
+            messagebox.showwarning("查無交易記錄",
                 f"此地址在 {chain} 鏈上沒有找到任何交易記錄。\n\n"
-                f"可能原因：\n"
-                f"• 這是一個全新、從未使用過的地址\n"
-                f"• 地址輸入有誤\n"
-                f"• 搜尋的鏈選擇錯誤\n\n"
-                f"請至區塊鏈瀏覽器確認：\n{explorer}"
-            )
+                f"可能原因：\n• 全新未使用的地址\n• 地址輸入有誤\n• 鏈選擇錯誤\n\n"
+                f"請至區塊鏈瀏覽器確認：\n{explorer}")
             self.status_var.set("查無資料｜請確認地址是否正確")
         else:
             mode = self._query_mode.get()
             if mode == "一般查詢":
-                saved_hint = "【一般查詢－未儲存至資料庫，清除結果後資料消失】"
+                saved_hint = "【一般查詢－未儲存至資料庫】"
             else:
                 case_hint = (f"已存入案件【{self._active_case['case_number']}】"
                              if self._active_case else "已儲存（未關聯案件）")
                 saved_hint = f"【專案查詢－{case_hint}】"
             self.status_var.set(
                 f"分析完成｜共 {total} 筆交易｜"
-                f"授權 {len(p.get('approval_targets', []))} 筆　{saved_hint}"
-            )
+                f"授權 {len(p.get('approval_targets',[]))} 筆　{saved_hint}")
+        self._refresh_sidebar()
 
     def _rebuild_tree(self, attr: str, rows: list[dict]):
         old_tree = getattr(self, attr)
@@ -1688,7 +2105,7 @@ class App(ctk.CTk):
             new_tree.insert("", "end", values=vals)
 
     # ═══════════════════════════════════════════════════════════════════════════
-    # 幣流關聯圖
+    # 幣流圖
     # ═══════════════════════════════════════════════════════════════════════════
 
     def _add_to_flow_graph(self):
@@ -1706,13 +2123,13 @@ class App(ctk.CTk):
         else:
             panel._gen_mode.set("explore")
         panel._update_mode_label()
-        self._show_page("flow")
+        self._show_step(4)
 
     def _on_flow_node_clicked(self, address: str, chain: str):
         self.addr_entry.delete(0, "end")
         self.addr_entry.insert(0, address)
         self.chain_var.set(chain)
-        self._show_page("profile")
+        self._show_case_data_tab("🔍  地址側寫")
         self._profile_tabs.set("錢包摘要")
         self._start_smart_query()
 
@@ -1787,14 +2204,12 @@ class App(ctk.CTk):
         s_ts = parse_datetime_str(s_str)
         if not s_ts:
             messagebox.showerror("時間格式錯誤",
-                                 f"起始時間格式錯誤：{s_str}\n"
-                                 "正確格式：YYYY-MM-DD HH:MM:SS")
+                                 f"起始時間格式錯誤：{s_str}\n正確格式：YYYY-MM-DD HH:MM:SS")
             return None
         e_ts = parse_datetime_str(e_str) if e_str else None
         if e_str and not e_ts:
             messagebox.showerror("時間格式錯誤",
-                                 f"迄止時間格式錯誤：{e_str}\n"
-                                 "正確格式：YYYY-MM-DD HH:MM:SS")
+                                 f"迄止時間格式錯誤：{e_str}\n正確格式：YYYY-MM-DD HH:MM:SS")
             return None
         if e_ts and e_ts < s_ts:
             messagebox.showerror("時間設定錯誤", "迄止時間不可早於起始時間")
@@ -1804,12 +2219,9 @@ class App(ctk.CTk):
             each = max(1, min(each, MAX_TOTAL // 2))
         except ValueError:
             each = 50
-
         if e_ts:
-            return {"mode": "range", "start_ts": s_ts, "end_ts": e_ts,
-                    "each_side": each}
-        return {"mode": "center", "start_ts": s_ts, "end_ts": None,
-                "each_side": each}
+            return {"mode": "range", "start_ts": s_ts, "end_ts": e_ts, "each_side": each}
+        return {"mode": "center", "start_ts": s_ts, "end_ts": None, "each_side": each}
 
     def _clear_time_filter(self):
         self._time_start.delete(0, "end")
