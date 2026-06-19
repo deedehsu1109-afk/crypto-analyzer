@@ -84,36 +84,48 @@ class EtherscanAPI:
             return 0.0
 
     def get_normal_transactions(self, address: str) -> list[dict]:
+        # Etherscan Free tier 2026-07-01 起每次最多回傳 1000 筆
         results, page = [], 1
         while True:
             data = self._get({
                 "module": "account", "action": "txlist",
                 "address": address, "startblock": 0,
                 "endblock": 99999999, "page": page,
-                "offset": 10000, "sort": "asc",
+                "offset": 1000, "sort": "asc",
             })
             txs = data.get("result", [])
             if not isinstance(txs, list) or not txs:
                 break
             results.extend(txs)
-            if len(txs) < 10000:
+            if len(txs) < 1000:
                 break
             page += 1
             time.sleep(0.3)
         return results
 
     def get_internal_transactions(self, address: str) -> list[dict]:
-        time.sleep(0.3)
-        data = self._get({
-            "module": "account", "action": "txlistinternal",
-            "address": address, "startblock": 0,
-            "endblock": 99999999, "page": 1,
-            "offset": 10000, "sort": "asc",
-        })
-        result = data.get("result", [])
-        return result if isinstance(result, list) else []
+        # Etherscan Free tier 2026-07-01 起每次最多回傳 1000 筆，需分頁
+        results, page = [], 1
+        while True:
+            time.sleep(0.3)
+            data = self._get({
+                "module": "account", "action": "txlistinternal",
+                "address": address, "startblock": 0,
+                "endblock": 99999999, "page": page,
+                "offset": 1000, "sort": "asc",
+            })
+            txs = data.get("result", [])
+            if not isinstance(txs, list) or not txs:
+                break
+            results.extend(txs)
+            if len(txs) < 1000:
+                break
+            page += 1
+            time.sleep(0.3)
+        return results
 
     def get_erc20_transfers(self, address: str) -> list[dict]:
+        # Etherscan Free tier 2026-07-01 起每次最多回傳 1000 筆
         results, page = [], 1
         while True:
             time.sleep(0.3)
@@ -121,13 +133,13 @@ class EtherscanAPI:
                 "module": "account", "action": "tokentx",
                 "address": address, "startblock": 0,
                 "endblock": 99999999, "page": page,
-                "offset": 10000, "sort": "asc",
+                "offset": 1000, "sort": "asc",
             })
             txs = data.get("result", [])
             if not isinstance(txs, list) or not txs:
                 break
             results.extend(txs)
-            if len(txs) < 10000:
+            if len(txs) < 1000:
                 break
             page += 1
             time.sleep(0.3)
