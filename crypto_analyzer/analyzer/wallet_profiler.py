@@ -165,17 +165,21 @@ def profile_trx(address: str, txs: list[dict], trc20_txs: list[dict],
 
     def _trc20_amount(t: dict) -> float:
         try:
-            decimals = int(t.get("tokenDecimal", 6) or 6)
-            return int(t.get("amount", 0)) / (10 ** decimals)
+            ti = t.get("tokenInfo") or {}
+            decimals = int(ti.get("tokenDecimal", 6) or 6)
+            return int(t.get("quant", 0)) / (10 ** decimals)
         except (ValueError, TypeError):
             return 0.0
+
+    def _trc20_symbol(t: dict) -> str:
+        return (t.get("tokenInfo") or {}).get("tokenAbbr", "?")
 
     trc20_out_by_token: dict[str, float] = defaultdict(float)
     trc20_in_by_token:  dict[str, float] = defaultdict(float)
     for t in trc20_out:
-        trc20_out_by_token[t.get("tokenAbbr", "?")] += _trc20_amount(t)
+        trc20_out_by_token[_trc20_symbol(t)] += _trc20_amount(t)
     for t in trc20_in:
-        trc20_in_by_token[t.get("tokenAbbr", "?")] += _trc20_amount(t)
+        trc20_in_by_token[_trc20_symbol(t)] += _trc20_amount(t)
 
     # 合計（原生 TRX + TRC-20 筆數）
     out_count = len(out_txs) + len(trc20_out)

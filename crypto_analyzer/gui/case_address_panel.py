@@ -28,7 +28,8 @@ BG_ROW_EVEN = "#1e2235"
 # ── 單筆新增 / 編輯對話框 ──────────────────────────────────────────────────────
 
 class AddressDialog(ctk.CTkToplevel):
-    def __init__(self, parent, case_id: int, row: dict = None, on_save=None):
+    def __init__(self, parent, case_id: int, row: dict = None, on_save=None,
+                 prefill: dict = None):
         super().__init__(parent)
         self.case_id = case_id
         self.row     = row or {}
@@ -43,6 +44,8 @@ class AddressDialog(ctk.CTkToplevel):
         self._build()
         if row:
             self._fill(row)
+        elif prefill:
+            self._fill(prefill)
         self.after(50, self._safe_grab)
 
     def _safe_grab(self):
@@ -153,6 +156,25 @@ class AddressDialog(ctk.CTkToplevel):
         if not addr:
             messagebox.showwarning("缺少資料", "地址/帳號為必填", parent=self)
             return
+
+        # ── 重複地址檢查 ──
+        current_id = self.row.get("id")
+        for existing in _db.get_case_addresses(self.case_id):
+            if (existing["address"].strip().lower() == addr.lower()
+                    and existing["id"] != current_id):
+                dup_chain = existing.get("chain_institution", "")
+                dup_role  = existing.get("holder_role", "")
+                dup_label = existing.get("label") or "（無標記）"
+                messagebox.showwarning(
+                    "地址重複",
+                    f"此地址已存在於本案件，拒絕重複新增。\n\n"
+                    f"地址：{addr}\n"
+                    f"鏈／機構：{dup_chain}　角色：{dup_role}\n"
+                    f"標記：{dup_label}",
+                    parent=self,
+                )
+                return
+
         addr_type = self._type_var.get()
         if addr_type == "加密錢包":
             chain_inst = self._chain_var.get()

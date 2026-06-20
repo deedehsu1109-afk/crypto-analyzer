@@ -110,6 +110,147 @@ class FlowGraphPanel(ctk.CTkFrame):
         self._pos = {}   # 清除佈局快取，觸發重新計算
         self._render()
 
+    def add_address_node(self, address: str, chain: str, label: str = ""):
+        """地址模式：僅新增單一節點，不加入任何交易邊。"""
+        if not address:
+            return
+        if self._state is None:
+            self._state = GraphState(chain=chain, mode="explore")
+            self._gen_mode.set("explore")
+            self._update_mode_label()
+        node = self._state.add_node(address)
+        if label:
+            node.custom_label = label
+        self._pos = {}
+        self._render()
+
+    def add_hash_edge(self, result: dict):
+        """Hash 模式：依交易分析結果新增發送方→接收方的交易邊。"""
+        chain    = result.get("chain", "ETH")
+        tx_hash  = result.get("hash", "")
+        time_str = result.get("時間", "")
+
+        if self._state is None:
+            self._state = GraphState(chain=chain, mode="explore")
+            self._gen_mode.set("explore")
+            self._update_mode_label()
+
+        rows: list[dict] = []
+
+        if chain == "ETH":
+            from_addr = result.get("發送方", "")
+            to_addr   = result.get("接收方", "")
+            try:
+                value_native = float(
+                    result.get("ETH 金額", "0").split()[0].replace(",", ""))
+            except (ValueError, IndexError):
+                value_native = 0.0
+            if from_addr and to_addr and "N/A" not in (from_addr, to_addr):
+                rows.append({
+                    "from_addr": from_addr, "to_addr": to_addr,
+                    "value_native": value_native, "token_symbol": "",
+                    "token_amount": 0.0, "tx_time": time_str,
+                    "tx_hash": tx_hash, "tx_type": "normal",
+                })
+            for t in result.get("token_transfers", []):
+                sym = ""
+                token_str = t.get("Token", "")
+                if "(" in token_str:
+                    sym = token_str.rsplit("(", 1)[-1].rstrip(")")
+                try:
+                    token_amt = float(t.get("金額", "0").replace(",", "") or 0)
+                except ValueError:
+                    token_amt = 0.0
+                f, to = t.get("從", ""), t.get("至", "")
+                if f and to:
+                    rows.append({
+                        "from_addr": f, "to_addr": to,
+                        "value_native": 0.0, "token_symbol": sym,
+                        "token_amount": token_amt, "tx_time": time_str,
+                        "tx_hash": tx_hash, "tx_type": "erc20",
+                    })
+
+        elif chain == "TRX":
+            from_addr = result.get("發送方", "")
+            to_addr   = result.get("接收方", "")
+            try:
+                value_native = float(
+                    result.get("TRX 金額", "0").split()[0].replace(",", ""))
+            except (ValueError, IndexError):
+                value_native = 0.0
+            if from_addr and to_addr and "N/A" not in (from_addr, to_addr):
+                rows.append({
+                    "from_addr": from_addr, "to_addr": to_addr,
+                    "value_native": value_native, "token_symbol": "",
+                    "token_amount": 0.0, "tx_time": time_str,
+                    "tx_hash": tx_hash, "tx_type": "normal",
+                })
+            for t in result.get("token_transfers", []):
+                sym = ""
+                token_str = t.get("Token", "")
+                if "(" in token_str:
+                    sym = token_str.rsplit("(", 1)[-1].rstrip(")")
+                try:
+                    token_amt = float(t.get("金額", "0").replace(",", "") or 0)
+                except ValueError:
+                    token_amt = 0.0
+                f, to = t.get("從", ""), t.get("至", "")
+                if f and to:
+                    rows.append({
+                        "from_addr": f, "to_addr": to,
+                        "value_native": 0.0, "token_symbol": sym,
+                        "token_amount": token_amt, "tx_time": time_str,
+                        "tx_hash": tx_hash, "tx_type": "trc20",
+                    })
+
+        elif chain == "BTC":
+            senders_str = result.get("發送方", "")
+            senders = [s.strip() for s in senders_str.split("、")
+                       if s.strip() and s.strip() != "N/A"]
+            for recv in result.get("接收方（明細）", []):
+                to_addr = recv.get("地址", "")
+                try:
+                    value_native = float(recv.get("BTC", "0").replace(",", ""))
+                except (ValueError, TypeError):
+                    value_native = 0.0
+                for from_addr in (senders or []):
+                    if from_addr and to_addr:
+                        rows.append({
+                            "from_addr": from_addr, "to_addr": to_addr,
+                            "value_native": value_native, "token_symbol": "",
+                            "token_amount": 0.0, "tx_time": time_str,
+                            "tx_hash": tx_hash, "tx_type": "btc",
+                        })
+
+        if rows:
+            self._state.add_edges_from_db_rows(rows)
+        self._pos = {}
+        self._render()
+
+    def add_row_edge(self, from_addr: str, to_addr: str, tx_hash: str,
+                     time_str: str, value_native: float,
+                     token_symbol: str, token_amount: float, chain: str):
+        """從 treeview 單列資料直接新增一條交易邊。"""
+        if not from_addr or not to_addr:
+            return
+        if self._state is None:
+            self._state = GraphState(chain=chain, mode="explore")
+            self._gen_mode.set("explore")
+            self._update_mode_label()
+        tx_type = "token" if token_symbol else "normal"
+        self._state.add_edges_from_db_rows([{
+            "from_addr":    from_addr,
+            "to_addr":      to_addr,
+            "value_native": value_native,
+            "token_symbol": token_symbol,
+            "token_amount": token_amount,
+            "tx_time":      time_str,
+            "tx_hash":      tx_hash,
+            "tx_type":      tx_type,
+        }])
+        self._pos = {}
+        self._render()
+
     def clear(self):
         self._state = None
         self._pos   = {}

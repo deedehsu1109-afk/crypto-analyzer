@@ -4,6 +4,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import customtkinter as ctk
 import datetime
+import webbrowser
 
 from config import load_config, save_config
 from api.etherscan import EtherscanAPI
@@ -17,7 +18,7 @@ from analyzer.time_filter import (parse_datetime_str, ts_to_str,
 from exporter.report import export_excel, export_csv
 from database import db as _db
 from gui.case_window import CaseDialog, LinkToCaseDialog
-from gui.case_address_panel import CaseAddressPanel
+from gui.case_address_panel import CaseAddressPanel, AddressDialog
 from gui.flow_graph_panel import FlowGraphPanel
 
 ctk.set_appearance_mode("dark")
@@ -118,6 +119,12 @@ class App(ctk.CTk):
         self._current_step        = 0
         self._case_addr_panel: CaseAddressPanel | None = None
         self._selected_case_id: int | None = None
+        self._tx_rows_base:    list[dict] = []
+        self._token_rows_base: list[dict] = []
+        self._sort_state: dict = {
+            "_tx_tree":    {"col": "", "asc": True},
+            "_token_tree": {"col": "", "asc": True},
+        }
         self._build_ui()
 
     # ═══════════════════════════════════════════════════════════════════════════
@@ -868,7 +875,9 @@ class App(ctk.CTk):
 
     def _build_profile_tab(self, parent: ctk.CTkFrame):
         parent.grid_columnconfigure(0, weight=1)
-        parent.grid_rowconfigure(2, weight=1)
+        parent.grid_rowconfigure(2, weight=0)  # 上方固定區域
+        parent.grid_rowconfigure(3, weight=0)  # 交易篩選列
+        parent.grid_rowconfigure(4, weight=1)  # 下方交易分頁（展開）
 
         top = ctk.CTkFrame(parent, corner_radius=8)
         top.grid(row=0, column=0, sticky="ew", padx=4, pady=(4, 2))
@@ -946,15 +955,92 @@ class App(ctk.CTk):
         self._time_bar = ctk.CTkFrame(tf_wrap, corner_radius=6, fg_color="#1e1e2e")
         self._build_time_bar(self._time_bar)
 
-        # 側寫子分頁
-        self._profile_tabs = ctk.CTkTabview(parent, corner_radius=8)
-        self._profile_tabs.grid(row=2, column=0, sticky="nsew", padx=4, pady=(2, 4))
-        for name in ["錢包摘要", "授權對象", "原始交易", "Token 轉帳"]:
-            self._profile_tabs.add(name)
-        self._build_summary_tab()
-        self._build_approvals_tab()
-        self._build_tx_tab("原始交易",   "_tx_tree")
-        self._build_tx_tab("Token 轉帳", "_token_tree")
+        # ── 上方固定區域：錢包摘要 ＋ 授權對象 ──
+        top_info = ctk.CTkFrame(parent, corner_radius=8, height=260)
+        top_info.grid(row=2, column=0, sticky="ew", padx=4, pady=(0, 2))
+        top_info.grid_propagate(False)
+        top_info.grid_columnconfigure(0, weight=3)
+        top_info.grid_columnconfigure(1, weight=0)
+        top_info.grid_columnconfigure(2, weight=2)
+        top_info.grid_rowconfigure(0, weight=1)
+
+        summary_f = ctk.CTkFrame(top_info, fg_color="transparent")
+        summary_f.grid(row=0, column=0, sticky="nsew", padx=(4, 0), pady=4)
+        self._build_summary_section(summary_f)
+
+        ctk.CTkFrame(top_info, width=1, fg_color="#2a3556").grid(
+            row=0, column=1, sticky="ns", padx=4, pady=8)
+
+        approvals_f = ctk.CTkFrame(top_info, fg_color="transparent")
+        approvals_f.grid(row=0, column=2, sticky="nsew", padx=(0, 4), pady=4)
+        self._build_approvals_section(approvals_f)
+
+        # ── 交易篩選列（雙列） ──
+        self._dust_filter_var  = tk.BooleanVar(value=False)
+        self._search_var       = tk.StringVar()
+        self._search_amt_min   = tk.StringVar()
+        self._search_amt_max   = tk.StringVar()
+        self._search_t_from    = tk.StringVar()
+        self._search_t_to      = tk.StringVar()
+
+        filter_bar = ctk.CTkFrame(parent, corner_radius=6, fg_color="#1a1a2e", height=72)
+        filter_bar.grid(row=3, column=0, sticky="ew", padx=4, pady=(0, 2))
+        filter_bar.grid_propagate(False)
+        filter_bar.grid_columnconfigure(0, weight=1)
+
+        # 第一列：釣魚過濾
+        r0 = ctk.CTkFrame(filter_bar, fg_color="transparent")
+        r0.grid(row=0, column=0, sticky="w", padx=0, pady=(4, 0))
+        self._dust_cb = ctk.CTkCheckBox(
+            r0, text="🚫 過濾釣魚交易（數量 ＜ 1）",
+            font=("Microsoft JhengHei", 11),
+            variable=self._dust_filter_var,
+            command=self._on_dust_filter_change,
+            fg_color="#7a1f1f", hover_color="#9a2f2f",
+            checkmark_color="white")
+        self._dust_cb.pack(side="left", padx=12)
+        self._dust_count_lbl = ctk.CTkLabel(
+            r0, text="", font=("Microsoft JhengHei", 10), text_color="#ff9944")
+        self._dust_count_lbl.pack(side="left", padx=4)
+
+        # 第二列：搜尋列
+        r1 = ctk.CTkFrame(filter_bar, fg_color="transparent")
+        r1.grid(row=1, column=0, sticky="ew", padx=0, pady=(2, 4))
+        _lf = ("Microsoft JhengHei", 10)
+        _ef = ("Consolas", 10)
+        ctk.CTkLabel(r1, text="🔍", font=_lf).pack(side="left", padx=(12, 2))
+        self._search_entry = ctk.CTkEntry(
+            r1, textvariable=self._search_var, width=185,
+            placeholder_text="地址 / 交易 Hash", font=_ef)
+        self._search_entry.pack(side="left", padx=(0, 6))
+        self._search_entry.bind("<Return>", lambda _: self._refresh_tx_display())
+        ctk.CTkLabel(r1, text="數量", font=_lf).pack(side="left", padx=(0, 2))
+        ctk.CTkEntry(r1, textvariable=self._search_amt_min,
+                     width=72, placeholder_text="最小", font=_ef).pack(side="left", padx=1)
+        ctk.CTkLabel(r1, text="～", font=_lf).pack(side="left")
+        ctk.CTkEntry(r1, textvariable=self._search_amt_max,
+                     width=72, placeholder_text="最大", font=_ef).pack(side="left", padx=(1, 6))
+        ctk.CTkLabel(r1, text="時間", font=_lf).pack(side="left", padx=(0, 2))
+        ctk.CTkEntry(r1, textvariable=self._search_t_from,
+                     width=130, placeholder_text="YYYY-MM-DD", font=_ef).pack(side="left", padx=1)
+        ctk.CTkLabel(r1, text="～", font=_lf).pack(side="left")
+        ctk.CTkEntry(r1, textvariable=self._search_t_to,
+                     width=130, placeholder_text="YYYY-MM-DD", font=_ef).pack(side="left", padx=(1, 6))
+        ctk.CTkButton(r1, text="套用", width=55, font=_lf, fg_color="#2a4a8a",
+                      command=self._refresh_tx_display).pack(side="left", padx=2)
+        ctk.CTkButton(r1, text="清除", width=55, font=_lf, fg_color="gray35",
+                      command=self._clear_tx_search).pack(side="left", padx=2)
+        self._search_result_lbl = ctk.CTkLabel(
+            r1, text="", font=_lf, text_color="#88aacc")
+        self._search_result_lbl.pack(side="left", padx=8)
+
+        # ── 下方交易分頁（展開） ──
+        self._tx_tabs = ctk.CTkTabview(parent, corner_radius=8)
+        self._tx_tabs.grid(row=4, column=0, sticky="nsew", padx=4, pady=(0, 4))
+        self._tx_tabs.add("原始交易")
+        self._tx_tabs.add("Token 轉帳")
+        self._build_tx_section(self._tx_tabs.tab("原始交易"),   "_tx_tree")
+        self._build_tx_section(self._tx_tabs.tab("Token 轉帳"), "_token_tree")
 
     def _build_time_bar(self, parent: ctk.CTkFrame):
         parent.grid_columnconfigure(7, weight=1)
@@ -1008,12 +1094,18 @@ class App(ctk.CTk):
             self._time_bar.pack_forget()
             self._time_toggle_btn.configure(text="⏱ 時間篩選 ▼")
 
-    def _build_summary_tab(self):
-        tab = self._profile_tabs.tab("錢包摘要")
-        tab.grid_columnconfigure(0, weight=1)
-        tab.grid_rowconfigure(0, weight=1)
-        frame = ctk.CTkScrollableFrame(tab, corner_radius=8)
-        frame.grid(row=0, column=0, sticky="nsew")
+    def _build_summary_section(self, parent: ctk.CTkFrame):
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_rowconfigure(1, weight=1)
+
+        ctk.CTkLabel(parent, text="錢包摘要",
+                     font=("Microsoft JhengHei", 10, "bold"),
+                     text_color="#aac4ff", anchor="w").grid(
+            row=0, column=0, padx=6, pady=(4, 2), sticky="w")
+
+        frame = ctk.CTkScrollableFrame(parent, corner_radius=0,
+                                       fg_color="transparent")
+        frame.grid(row=1, column=0, sticky="nsew", padx=0, pady=(0, 4))
         frame.grid_columnconfigure(1, weight=1)
 
         self._summary_labels: list[tuple[ctk.CTkLabel, ctk.CTkLabel]] = []
@@ -1030,42 +1122,46 @@ class App(ctk.CTk):
             is_sub = f.startswith("──")
             lbl = ctk.CTkLabel(frame, text=f + "：",
                                font=("Microsoft JhengHei",
-                                     11 if is_sub else 12,
+                                     10 if is_sub else 11,
                                      "normal" if is_sub else "bold"),
                                text_color=("gray60" if is_sub else None),
-                               anchor="e", width=200)
-            lbl.grid(row=i, column=0, padx=(12, 6),
-                     pady=3 if is_sub else 5, sticky="e")
+                               anchor="e", width=170)
+            lbl.grid(row=i, column=0, padx=(6, 4),
+                     pady=2 if is_sub else 3, sticky="e")
             val = ctk.CTkLabel(frame, text="—",
-                               font=("Consolas", 11 if is_sub else 12),
-                               anchor="w", wraplength=600)
-            val.grid(row=i, column=1, padx=(4, 12),
-                     pady=3 if is_sub else 5, sticky="w")
+                               font=("Consolas", 10 if is_sub else 11),
+                               anchor="w", wraplength=250)
+            val.grid(row=i, column=1, padx=(2, 6),
+                     pady=2 if is_sub else 3, sticky="w")
             self._bind_label_copy_menu(val)
             self._summary_labels.append((lbl, val))
 
         self._tf_info_lbl = ctk.CTkLabel(
-            frame, text="", font=("Microsoft JhengHei", 11),
-            anchor="w", text_color="#ffcc55", wraplength=700)
+            frame, text="", font=("Microsoft JhengHei", 10),
+            anchor="w", text_color="#ffcc55", wraplength=380)
         self._tf_info_lbl.grid(row=len(fields), column=0, columnspan=2,
-                               padx=12, pady=(4, 8), sticky="w")
+                               padx=6, pady=(2, 6), sticky="w")
 
-    def _build_approvals_tab(self):
-        tab = self._profile_tabs.tab("授權對象")
-        tab.grid_columnconfigure(0, weight=1)
-        tab.grid_rowconfigure(0, weight=1)
-        frame = ctk.CTkFrame(tab, corner_radius=8)
-        frame.grid(row=0, column=0, sticky="nsew")
+    def _build_approvals_section(self, parent: ctk.CTkFrame):
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_rowconfigure(1, weight=1)
+
+        ctk.CTkLabel(parent, text="授權對象",
+                     font=("Microsoft JhengHei", 10, "bold"),
+                     text_color="#aac4ff", anchor="w").grid(
+            row=0, column=0, padx=6, pady=(4, 2), sticky="w")
+
+        frame = ctk.CTkFrame(parent, corner_radius=0, fg_color="transparent")
+        frame.grid(row=1, column=0, sticky="nsew", padx=0, pady=(0, 4))
         frame.grid_columnconfigure(0, weight=1)
         frame.grid_rowconfigure(0, weight=1)
         cols = ("合約地址", "授權對象 (Spender)", "交易 Hash / 金額", "時間")
         self._approval_tree = self._make_treeview(frame, cols)
 
-    def _build_tx_tab(self, tab_name: str, attr: str):
-        tab = self._profile_tabs.tab(tab_name)
-        tab.grid_columnconfigure(0, weight=1)
-        tab.grid_rowconfigure(0, weight=1)
-        frame = ctk.CTkFrame(tab, corner_radius=8)
+    def _build_tx_section(self, parent: ctk.CTkFrame, attr: str):
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_rowconfigure(0, weight=1)
+        frame = ctk.CTkFrame(parent, corner_radius=8)
         frame.grid(row=0, column=0, sticky="nsew")
         frame.grid_columnconfigure(0, weight=1)
         frame.grid_rowconfigure(0, weight=1)
@@ -1104,7 +1200,13 @@ class App(ctk.CTk):
             input_frame, text="查詢", width=90,
             font=("Microsoft JhengHei", 12, "bold"),
             command=self._start_hash_analysis)
-        self.hash_btn.grid(row=0, column=4, padx=(4, 12), pady=8)
+        self.hash_btn.grid(row=0, column=4, padx=(4, 4), pady=8)
+
+        ctk.CTkButton(
+            input_frame, text="加入幣流圖", width=90,
+            font=("Microsoft JhengHei", 11), fg_color="#4a2d6a",
+            command=self._add_hash_to_flow_graph).grid(
+            row=0, column=5, padx=(4, 12), pady=8)
 
         result_frame = ctk.CTkFrame(parent, corner_radius=8)
         result_frame.grid(row=1, column=0, sticky="nsew", padx=4, pady=(0, 4))
@@ -1395,7 +1497,8 @@ class App(ctk.CTk):
     # Treeview 與右鍵選單
     # ═══════════════════════════════════════════════════════════════════════════
 
-    def _make_treeview(self, parent, columns: tuple) -> ttk.Treeview:
+    def _make_treeview(self, parent, columns: tuple,
+                       add_addr_menu: bool = False) -> ttk.Treeview:
         style = ttk.Style()
         style.theme_use("clam")
         style.configure("Treeview", background="#2b2b2b", foreground="white",
@@ -1419,7 +1522,7 @@ class App(ctk.CTk):
         hsb.grid(row=1, column=0, sticky="ew")
         parent.grid_columnconfigure(0, weight=1)
         parent.grid_rowconfigure(0, weight=1)
-        self._bind_tree_context_menu(tree)
+        self._bind_tree_context_menu(tree, add_addr_menu=add_addr_menu)
         return tree
 
     def _bind_entry_context_menu(self, widget):
@@ -1436,7 +1539,8 @@ class App(ctk.CTk):
                                           inner.icursor("end")))
         inner.bind("<Button-3>", lambda e: menu.tk_popup(e.x_root, e.y_root))
 
-    def _bind_tree_context_menu(self, tree: ttk.Treeview):
+    def _bind_tree_context_menu(self, tree: ttk.Treeview,
+                                add_addr_menu: bool = False):
         menu = tk.Menu(tree, tearoff=0, bg="#2b2b2b", fg="white",
                        activebackground="#1f538d", activeforeground="white",
                        font=("Microsoft JhengHei", 11))
@@ -1479,6 +1583,100 @@ class App(ctk.CTk):
         menu.add_command(label="複製整列", command=copy_row)
         menu.add_separator()
         menu.add_command(label="複製全部（含標題）", command=copy_all)
+
+        if add_addr_menu:
+            def _add_addr(col_name: str):
+                sel = tree.selection()
+                if not sel:
+                    return
+                vals = tree.item(sel[0])["values"]
+                cols = list(tree["columns"])
+                try:
+                    raw = str(vals[cols.index(col_name)])
+                except (ValueError, IndexError):
+                    messagebox.showinfo("提示", f"目前分頁無「{col_name}」欄位", parent=self)
+                    return
+                addr = raw.split("…")[0].strip()
+                if not addr or addr == "—":
+                    messagebox.showinfo("無地址", "此欄位無有效地址", parent=self)
+                    return
+                if not self._active_case:
+                    messagebox.showwarning("未選擇案件",
+                        "請先在步驟 3 選取或建立案件，才能加入涉案地址。",
+                        parent=self)
+                    return
+                chain = self._profile.get("chain", "TRX") if self._profile else "TRX"
+                def on_save():
+                    self._refresh_case_addr_tab()
+                    self._refresh_sidebar()
+                AddressDialog(
+                    self,
+                    case_id=self._active_case["id"],
+                    prefill={"addr_type": "加密錢包",
+                             "chain_institution": chain,
+                             "address": addr},
+                    on_save=on_save,
+                )
+
+            menu.add_separator()
+            menu.add_command(label="＋ 加入發送方至涉案地址",
+                             command=lambda: _add_addr("發送方"))
+            menu.add_command(label="＋ 加入接收方至涉案地址",
+                             command=lambda: _add_addr("接收方"))
+
+            def _add_tx_to_flow():
+                sel = tree.selection()
+                if not sel:
+                    return
+                vals = tree.item(sel[0])["values"]
+                cols = list(tree["columns"])
+
+                def _get(col: str) -> str:
+                    try:
+                        return str(vals[cols.index(col)])
+                    except (ValueError, IndexError):
+                        return ""
+
+                tx_hash   = _get("交易哈希")
+                time_str  = _get("時間 (UTC+8)")
+                from_addr = _get("發送方")
+                to_addr   = _get("接收方")
+                token     = _get("代幣")
+                amt_str   = _get("數量")
+
+                if not from_addr or not to_addr or from_addr == "—" or to_addr == "—":
+                    messagebox.showinfo("無法加入", "此列缺少發送方或接收方地址", parent=self)
+                    return
+
+                try:
+                    amount = float(amt_str.replace(",", "") or 0)
+                except ValueError:
+                    amount = 0.0
+
+                if token in ("ETH", "TRX", "BTC"):
+                    value_native = amount
+                    token_symbol = ""
+                    token_amount = 0.0
+                else:
+                    value_native = 0.0
+                    token_symbol = token if token not in ("", "—") else ""
+                    token_amount = amount
+
+                chain = self._profile.get("chain", "ETH") if self._profile else "ETH"
+                panel: FlowGraphPanel = self._flow_panel
+                panel.add_row_edge(from_addr, to_addr, tx_hash, time_str,
+                                   value_native, token_symbol, token_amount, chain)
+                if self._query_mode.get() == "專案查詢" and self._active_case:
+                    panel.set_case_id(self._active_case["id"])
+                    panel._gen_mode.set("evidence")
+                else:
+                    panel._gen_mode.set("explore")
+                panel._update_mode_label()
+                self._show_step(4)
+
+            menu.add_separator()
+            menu.add_command(label="📊 此交易加入幣流圖",
+                             command=_add_tx_to_flow)
 
         def show(event):
             region = tree.identify_region(event.x, event.y)
@@ -1611,6 +1809,9 @@ class App(ctk.CTk):
 
     def _clear_results(self):
         self._profile = None
+        self._last_hash_result = None
+        self._tx_rows_base    = []
+        self._token_rows_base = []
         for _, val_lbl in self._summary_labels:
             val_lbl.configure(text="—")
         for iid in self._approval_tree.get_children():
@@ -1627,7 +1828,21 @@ class App(ctk.CTk):
         self.addr_entry.delete(0, "end")
         if hasattr(self, "hash_entry"):
             self.hash_entry.delete(0, "end")
+        if hasattr(self, "_search_var"):
+            self._search_var.set("")
+            self._search_amt_min.set("")
+            self._search_amt_max.set("")
+            self._search_t_from.set("")
+            self._search_t_to.set("")
+        if hasattr(self, "_dust_count_lbl"):
+            self._dust_count_lbl.configure(text="")
+        if hasattr(self, "_search_result_lbl"):
+            self._search_result_lbl.configure(text="")
         self.status_var.set("查詢結果已清除")
+
+    def _on_dust_filter_change(self):
+        if self._profile is not None:
+            self._refresh_tx_display()
 
     def _on_addr_focusout(self, _event=None):
         address = self.addr_entry.get().strip()
@@ -1753,6 +1968,7 @@ class App(ctk.CTk):
         messagebox.showerror("查詢失敗", msg)
 
     def _update_hash_ui(self, result: dict):
+        self._last_hash_result = result
         self.progress.stop()
         self.progress.grid_remove()
         self.hash_btn.configure(state="normal")
@@ -1860,6 +2076,8 @@ class App(ctk.CTk):
                 self._set_status("正在分析授權紀錄...")
                 approvals = api.get_token_approvals(txs, address)
                 profile   = profile_eth(address, txs, int_txs, erc20, approvals)
+                total_raw = len(txs) + len(erc20)
+                detail    = f"原生交易 {len(txs)} 筆、ERC-20 轉帳 {len(erc20)} 筆"
             elif chain == "TRX":
                 api = TronScanAPI(self.config_data.get("trongrid_api_key", ""))
                 self._set_status("正在抓取 TRX 交易資料...")
@@ -1871,11 +2089,27 @@ class App(ctk.CTk):
                 self._set_status("正在分析授權紀錄...")
                 approvals = api.get_token_approvals(txs, address)
                 profile   = profile_trx(address, txs, trc20, approvals)
+                total_raw = len(txs) + len(trc20)
+                detail    = f"原生交易 {len(txs)} 筆、TRC-20 轉帳 {len(trc20)} 筆"
             else:
                 api = BitcoinAPI()
                 self._set_status("正在抓取 BTC 交易資料...")
                 txs     = api.get_transactions(address)
                 profile = profile_btc(address, txs)
+                total_raw = len(txs)
+                detail    = f"交易 {len(txs)} 筆"
+
+            # ── 原始資料超量警告（無時間篩選時） ──
+            if total_raw > MAX_TOTAL and not tf:
+                import queue as _queue
+                q = _queue.Queue()
+                self.after(0, self._show_overflow_dialog,
+                           total_raw, detail, address, chain, q)
+                if not q.get(timeout=120):
+                    self.after(0, self._stop_progress)
+                    self._set_status(
+                        f"已取消｜共 {total_raw:,} 筆，請設定時間篩選後重新查詢")
+                    return
 
             if tf and not (chain == "TRX" and tf["mode"] == "range"):
                 self._set_status("正在套用時間篩選...")
@@ -1973,6 +2207,90 @@ class App(ctk.CTk):
         self.progress.grid_remove()
         self.analyze_btn.configure(state="normal")
 
+    def _show_overflow_dialog(self, total_raw: int, detail: str,
+                               address: str, chain: str, result_queue):
+        """超量警告自訂對話框（主執行緒呼叫，結果透過 queue 回傳）。"""
+        _CHAIN_PATH = {"ETH": "eth", "TRX": "tron", "BTC": "btc"}
+        chain_path  = _CHAIN_PATH.get(chain, chain.lower())
+        oklink_url  = f"https://www.oklink.com/zh-hant/{chain_path}/address/{address}"
+
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("交易筆數過多")
+        dlg.geometry("540x340")
+        dlg.resizable(False, False)
+        dlg.grab_set()
+        dlg.focus_force()
+        dlg.protocol("WM_DELETE_WINDOW", lambda: (result_queue.put(False), dlg.destroy()))
+
+        result = [False]
+
+        body = ctk.CTkFrame(dlg, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=20, pady=16)
+
+        ctk.CTkLabel(body,
+            text=f"⚠  共抓取到 {total_raw:,} 筆交易記錄",
+            font=("Microsoft JhengHei", 14, "bold"),
+            text_color="#ffcc44").pack(anchor="w")
+
+        ctk.CTkLabel(body,
+            text=detail,
+            font=("Microsoft JhengHei", 11),
+            text_color="gray70").pack(anchor="w", pady=(2, 10))
+
+        ctk.CTkLabel(body,
+            text="資料量過大可能導致：\n"
+                 "  • 顯示與捲動較慢\n"
+                 "  • 幣流圖節點過多難以辨識\n\n"
+                 "建議：先至 OKLink 確認該地址是否為交易所錢包\n"
+                 "（具有「水庫」等標籤），再決定是否套用時間篩選。",
+            font=("Microsoft JhengHei", 11),
+            justify="left",
+            text_color="gray85").pack(anchor="w")
+
+        link_frame = ctk.CTkFrame(body, fg_color="#1a2a3a", corner_radius=6)
+        link_frame.pack(fill="x", pady=(10, 4))
+        ctk.CTkLabel(link_frame,
+            text="🔗  OKLink 地址查詢：",
+            font=("Microsoft JhengHei", 10),
+            text_color="gray60").pack(side="left", padx=(10, 4), pady=6)
+        url_lbl = ctk.CTkLabel(link_frame,
+            text=oklink_url,
+            font=("Consolas", 10),
+            text_color="#4da6ff",
+            cursor="hand2")
+        url_lbl.pack(side="left", pady=6)
+        url_lbl.bind("<Button-1>", lambda _: webbrowser.open(oklink_url))
+        ctk.CTkButton(link_frame,
+            text="開啟", width=55, height=24,
+            font=("Microsoft JhengHei", 10),
+            fg_color="#1f538d",
+            command=lambda: webbrowser.open(oklink_url)).pack(
+            side="right", padx=8, pady=4)
+
+        btn_frame = ctk.CTkFrame(body, fg_color="transparent")
+        btn_frame.pack(fill="x", pady=(12, 0))
+
+        def _yes():
+            result[0] = True
+            result_queue.put(True)
+            dlg.destroy()
+
+        def _no():
+            result[0] = False
+            result_queue.put(False)
+            dlg.destroy()
+
+        ctk.CTkButton(btn_frame,
+            text=f"繼續顯示全部 {total_raw:,} 筆",
+            width=200, font=("Microsoft JhengHei", 11),
+            fg_color="#2a5a2a", hover_color="#3a7a3a",
+            command=_yes).pack(side="left")
+        ctk.CTkButton(btn_frame,
+            text="取消，改用時間篩選",
+            width=180, font=("Microsoft JhengHei", 11),
+            fg_color="gray30", hover_color="gray40",
+            command=_no).pack(side="right")
+
     # ═══════════════════════════════════════════════════════════════════════════
     # UI 更新
     # ═══════════════════════════════════════════════════════════════════════════
@@ -2054,9 +2372,22 @@ class App(ctk.CTk):
                 a.get("tx_hash", a.get("amount","")), a.get("time",""),
             ))
 
-        self._rebuild_tree("_tx_tree", p.get("raw_txs", []))
-        token_data = p.get("raw_erc20", p.get("raw_trc20", []))
-        self._rebuild_tree("_token_tree", token_data)
+        tx_rows, token_rows = self._normalize_for_display(p)
+        self._tx_rows_base    = tx_rows
+        self._token_rows_base = token_rows
+        self._sort_state["_tx_tree"]    = {"col": "", "asc": True}
+        self._sort_state["_token_tree"] = {"col": "", "asc": True}
+        if hasattr(self, "_search_var"):
+            self._search_var.set("")
+            self._search_amt_min.set("")
+            self._search_amt_max.set("")
+            self._search_t_from.set("")
+            self._search_t_to.set("")
+        if hasattr(self, "_search_result_lbl"):
+            self._search_result_lbl.configure(text="")
+        self._rebuild_tree("_tx_tree",    tx_rows)
+        self._rebuild_tree("_token_tree", token_rows)
+        self._refresh_tx_display()
 
         total    = p.get("out_count",0) + p.get("in_count",0)
         has_data = bool(p.get("raw_txs") or p.get("raw_erc20") or p.get("raw_trc20"))
@@ -2085,6 +2416,324 @@ class App(ctk.CTk):
                 f"授權 {len(p.get('approval_targets',[]))} 筆　{saved_hint}")
         self._refresh_sidebar()
 
+    def _normalize_for_display(self, p: dict) -> tuple[list[dict], list[dict]]:
+        """將各鏈原始 API 資料轉換為固定 6 欄顯示格式，時間統一轉 UTC+8。"""
+        _TZ8 = datetime.timezone(datetime.timedelta(hours=8))
+
+        def _fmt_ts(ts_val, ms=False) -> str:
+            try:
+                ts = int(ts_val)
+                if ms:
+                    ts //= 1000
+                if ts <= 0:
+                    return "—"
+                return datetime.datetime.fromtimestamp(ts, tz=_TZ8).strftime(
+                    "%Y-%m-%d %H:%M:%S")
+            except Exception:
+                return "—"
+
+        chain     = p.get("chain", "")
+        raw_txs   = p.get("raw_txs",   [])
+        raw_erc20 = p.get("raw_erc20", [])
+        raw_trc20 = p.get("raw_trc20", [])
+        tx_rows: list[dict]    = []
+        token_rows: list[dict] = []
+
+        if chain == "ETH":
+            for t in raw_txs:
+                try:
+                    amt = f"{int(t.get('value', 0)) / 1e18:.8f}"
+                except Exception:
+                    amt = t.get("value", "—")
+                tx_rows.append({
+                    "交易哈希":      t.get("hash", ""),
+                    "時間 (UTC+8)": _fmt_ts(t.get("timeStamp", 0)),
+                    "發送方":        t.get("from", ""),
+                    "接收方":        t.get("to",   ""),
+                    "代幣":          "ETH",
+                    "數量":          amt,
+                })
+            for t in raw_erc20:
+                try:
+                    dec = int(t.get("tokenDecimal", 18) or 18)
+                    amt = f"{int(t.get('value', 0)) / (10 ** dec):.6f}"
+                except Exception:
+                    amt = t.get("value", "—")
+                token_rows.append({
+                    "交易哈希":      t.get("hash", ""),
+                    "時間 (UTC+8)": _fmt_ts(t.get("timeStamp", 0)),
+                    "發送方":        t.get("from", ""),
+                    "接收方":        t.get("to",   ""),
+                    "代幣":          t.get("tokenSymbol", "—"),
+                    "數量":          amt,
+                })
+
+        elif chain == "TRX":
+            for t in raw_txs:
+                try:
+                    sun = t.get("amount", 0) or t.get("contractData", {}).get("amount", 0)
+                    amt = f"{int(sun) / 1_000_000:.6f}"
+                except Exception:
+                    amt = "—"
+                tx_rows.append({
+                    "交易哈希":      t.get("hash", ""),
+                    "時間 (UTC+8)": _fmt_ts(t.get("timestamp", 0), ms=True),
+                    "發送方":        t.get("ownerAddress", ""),
+                    "接收方":        t.get("toAddress",    ""),
+                    "代幣":          "TRX",
+                    "數量":          amt,
+                })
+            for t in raw_trc20:
+                ti = t.get("tokenInfo") or {}
+                try:
+                    dec = int(ti.get("tokenDecimal", 6) or 6)
+                    amt = f"{int(t.get('quant', 0)) / (10 ** dec):.6f}"
+                except Exception:
+                    amt = "—"
+                token_rows.append({
+                    "交易哈希":      t.get("transaction_id", ""),
+                    "時間 (UTC+8)": _fmt_ts(t.get("block_ts", 0), ms=True),
+                    "發送方":        t.get("from_address", ""),
+                    "接收方":        t.get("to_address",   ""),
+                    "代幣":          ti.get("tokenAbbr", "—"),
+                    "數量":          amt,
+                })
+
+        elif chain == "BTC":
+            for t in raw_txs:
+                inputs  = t.get("inputs", [])
+                outputs = t.get("out",    [])
+                from_addrs = list(dict.fromkeys(
+                    i.get("prev_out", {}).get("addr", "")
+                    for i in inputs if i.get("prev_out", {}).get("addr")
+                ))
+                to_addrs = list(dict.fromkeys(
+                    o.get("addr", "") for o in outputs if o.get("addr")
+                ))
+                if len(from_addrs) == 1:
+                    from_str = from_addrs[0]
+                elif from_addrs:
+                    from_str = f"{from_addrs[0]}…（共{len(from_addrs)}方）"
+                else:
+                    from_str = "—"
+                if len(to_addrs) == 1:
+                    to_str = to_addrs[0]
+                elif to_addrs:
+                    to_str = f"{to_addrs[0]}…（共{len(to_addrs)}方）"
+                else:
+                    to_str = "—"
+                try:
+                    total_sat = sum(o.get("value", 0) for o in outputs)
+                    amt = f"{total_sat / 1e8:.8f}"
+                except Exception:
+                    amt = "—"
+                tx_rows.append({
+                    "交易哈希":      t.get("hash", ""),
+                    "時間 (UTC+8)": _fmt_ts(t.get("time", 0)),
+                    "發送方":        from_str,
+                    "接收方":        to_str,
+                    "代幣":          "BTC",
+                    "數量":          amt,
+                })
+
+        return tx_rows, token_rows
+
+    # ── dust / search / sort helpers ─────────────────────────────────────────
+
+    def _dust_filter_rows(self, tx_rows: list[dict], token_rows: list[dict]):
+        """套用釣魚交易過濾，回傳 (tx_rows, token_rows, filtered_count)。"""
+        if not (getattr(self, "_dust_filter_var", None) and self._dust_filter_var.get()):
+            return tx_rows, token_rows, 0
+
+        def _keep(row: dict) -> bool:
+            try:
+                amt = float(row.get("數量", "0") or 0)
+            except (ValueError, TypeError):
+                return True
+            token = row.get("代幣", "")
+            if token == "ETH":
+                threshold = 0.001
+            elif token == "BTC":
+                threshold = 0.00001
+            else:
+                threshold = 1.0
+            return amt >= threshold
+
+        orig       = len(tx_rows) + len(token_rows)
+        tx_rows    = [r for r in tx_rows    if _keep(r)]
+        token_rows = [r for r in token_rows if _keep(r)]
+        return tx_rows, token_rows, orig - len(tx_rows) - len(token_rows)
+
+    def _apply_search_filter(self, rows: list[dict]) -> list[dict]:
+        """依搜尋列條件篩選，全空時直接回傳原 list。"""
+        text    = self._search_var.get().strip().lower()
+        amt_min = self._search_amt_min.get().strip()
+        amt_max = self._search_amt_max.get().strip()
+        t_from  = self._search_t_from.get().strip()
+        t_to    = self._search_t_to.get().strip()
+
+        if not any([text, amt_min, amt_max, t_from, t_to]):
+            return rows
+
+        result = []
+        for r in rows:
+            if text:
+                haystack = (
+                    r.get("交易哈希", "") + " " +
+                    r.get("發送方",   "") + " " +
+                    r.get("接收方",   "")
+                ).lower()
+                if text not in haystack:
+                    continue
+            if amt_min or amt_max:
+                try:
+                    amt = float(r.get("數量", "0") or 0)
+                except (ValueError, TypeError):
+                    amt = 0.0
+                if amt_min:
+                    try:
+                        if amt < float(amt_min):
+                            continue
+                    except ValueError:
+                        pass
+                if amt_max:
+                    try:
+                        if amt > float(amt_max):
+                            continue
+                    except ValueError:
+                        pass
+            if t_from or t_to:
+                ts = r.get("時間 (UTC+8)", "")
+                date_str = ts[:10] if len(ts) >= 10 else ts
+                if t_from and date_str < t_from:
+                    continue
+                if t_to and date_str > t_to:
+                    continue
+            result.append(r)
+        return result
+
+    def _apply_sort(self, rows: list[dict], attr: str) -> list[dict]:
+        state = self._sort_state.get(attr, {})
+        col   = state.get("col", "")
+        asc   = state.get("asc", True)
+        if not col:
+            return rows
+
+        def _key(r: dict):
+            v = r.get(col, "")
+            if col == "數量":
+                try:
+                    return float(v or 0)
+                except (ValueError, TypeError):
+                    return 0.0
+            return str(v)
+
+        return sorted(rows, key=_key, reverse=not asc)
+
+    def _fill_tree(self, attr: str, rows: list[dict]):
+        tree = getattr(self, attr, None)
+        if tree is None:
+            return
+        cols = tree.cget("columns")
+        for iid in tree.get_children():
+            tree.delete(iid)
+        for row in rows[:5000]:
+            tree.insert("", "end", values=[str(row.get(c, "")) for c in cols])
+
+    def _on_sort_click(self, col: str, attr: str):
+        state = self._sort_state[attr]
+        if state["col"] == col:
+            state["asc"] = not state["asc"]
+        else:
+            state["col"] = col
+            state["asc"] = True
+        self._update_sort_headings(attr)
+        self._refresh_tx_display()
+
+    def _update_sort_headings(self, attr: str):
+        tree  = getattr(self, attr, None)
+        if tree is None:
+            return
+        state = self._sort_state.get(attr, {})
+        active_col = state.get("col", "")
+        asc        = state.get("asc", True)
+        labels = {
+            "時間 (UTC+8)": "時間 (UTC+8)",
+            "數量":         "數量",
+        }
+        for col, base in labels.items():
+            if col == active_col:
+                indicator = " ▲" if asc else " ▼"
+            else:
+                indicator = ""
+            try:
+                tree.heading(col, text=base + indicator)
+            except Exception:
+                pass
+
+    def _bind_sort_headings(self, attr: str):
+        tree = getattr(self, attr, None)
+        if tree is None:
+            return
+        for col in ("時間 (UTC+8)", "數量"):
+            try:
+                tree.heading(col, command=lambda c=col, a=attr: self._on_sort_click(c, a))
+            except Exception:
+                pass
+        self._update_sort_headings(attr)
+
+    def _refresh_tx_display(self):
+        tx_rows    = list(self._tx_rows_base)
+        token_rows = list(self._token_rows_base)
+
+        # 釣魚過濾
+        tx_rows, token_rows, dust_cnt = self._dust_filter_rows(tx_rows, token_rows)
+        if hasattr(self, "_dust_count_lbl"):
+            if getattr(self, "_dust_filter_var", None) and self._dust_filter_var.get():
+                self._dust_count_lbl.configure(
+                    text=f"已過濾 {dust_cnt} 筆釣魚交易" if dust_cnt else "未發現釣魚交易")
+            else:
+                self._dust_count_lbl.configure(text="")
+
+        # 搜尋過濾
+        tx_rows_f    = self._apply_search_filter(tx_rows)
+        token_rows_f = self._apply_search_filter(token_rows)
+
+        # 排序
+        tx_rows_f    = self._apply_sort(tx_rows_f,    "_tx_tree")
+        token_rows_f = self._apply_sort(token_rows_f, "_token_tree")
+
+        # 填入 treeview
+        self._fill_tree("_tx_tree",    tx_rows_f)
+        self._fill_tree("_token_tree", token_rows_f)
+
+        # 搜尋結果標籤
+        if hasattr(self, "_search_result_lbl"):
+            total_base = len(tx_rows) + len(token_rows)
+            total_show = len(tx_rows_f) + len(token_rows_f)
+            has_filter = any([
+                self._search_var.get().strip(),
+                self._search_amt_min.get().strip(),
+                self._search_amt_max.get().strip(),
+                self._search_t_from.get().strip(),
+                self._search_t_to.get().strip(),
+            ])
+            if has_filter:
+                self._search_result_lbl.configure(
+                    text=f"顯示 {total_show} / {total_base} 筆")
+            else:
+                self._search_result_lbl.configure(text="")
+
+    def _clear_tx_search(self):
+        self._search_var.set("")
+        self._search_amt_min.set("")
+        self._search_amt_max.set("")
+        self._search_t_from.set("")
+        self._search_t_to.set("")
+        if hasattr(self, "_search_result_lbl"):
+            self._search_result_lbl.configure(text="")
+        self._refresh_tx_display()
+
     def _rebuild_tree(self, attr: str, rows: list[dict]):
         old_tree = getattr(self, attr)
         if not rows:
@@ -2093,7 +2742,10 @@ class App(ctk.CTk):
         for w in parent.winfo_children():
             w.destroy()
         keys     = list(rows[0].keys())
-        new_tree = self._make_treeview(parent, tuple(keys))
+        new_tree = self._make_treeview(
+            parent, tuple(keys),
+            add_addr_menu=(attr in ("_tx_tree", "_token_tree")),
+        )
         setattr(self, attr, new_tree)
         for row in rows[:5000]:
             vals = []
@@ -2103,20 +2755,37 @@ class App(ctk.CTk):
                     v = str(v)[:80]
                 vals.append(v)
             new_tree.insert("", "end", values=vals)
+        if attr in ("_tx_tree", "_token_tree"):
+            self._bind_sort_headings(attr)
 
     # ═══════════════════════════════════════════════════════════════════════════
     # 幣流圖
     # ═══════════════════════════════════════════════════════════════════════════
 
     def _add_to_flow_graph(self):
+        """地址側寫 → 加入單一節點（不加邊）。"""
         if not self._profile:
             messagebox.showinfo("尚無資料", "請先執行分析。")
             return
         panel: FlowGraphPanel = self._flow_panel
-        if panel._state is None:
-            panel.load_from_profile(self._profile)
+        address = self._profile.get("address", "")
+        chain   = self._profile.get("chain", "ETH")
+        panel.add_address_node(address, chain)
+        if self._query_mode.get() == "專案查詢" and self._active_case:
+            panel.set_case_id(self._active_case["id"])
+            panel._gen_mode.set("evidence")
         else:
-            panel.add_profile_to_graph(self._profile)
+            panel._gen_mode.set("explore")
+        panel._update_mode_label()
+        self._show_step(4)
+
+    def _add_hash_to_flow_graph(self):
+        """Hash 分析 → 加入發送方→接收方的交易邊。"""
+        if not getattr(self, "_last_hash_result", None):
+            messagebox.showinfo("尚無資料", "請先執行交易 Hash 查詢。")
+            return
+        panel: FlowGraphPanel = self._flow_panel
+        panel.add_hash_edge(self._last_hash_result)
         if self._query_mode.get() == "專案查詢" and self._active_case:
             panel.set_case_id(self._active_case["id"])
             panel._gen_mode.set("evidence")
@@ -2130,7 +2799,6 @@ class App(ctk.CTk):
         self.addr_entry.insert(0, address)
         self.chain_var.set(chain)
         self._show_case_data_tab("🔍  地址側寫")
-        self._profile_tabs.set("錢包摘要")
         self._start_smart_query()
 
     # ═══════════════════════════════════════════════════════════════════════════
