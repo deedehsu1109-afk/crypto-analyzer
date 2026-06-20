@@ -871,6 +871,21 @@ class App(ctk.CTk):
         self.addr_entry.insert(0, address)
         self._data_tabs.set("🔍  地址側寫")
 
+        wallet_row = _db.get_wallet_by_address(chain, address)
+        if wallet_row is None:
+            return
+        wallet_id = wallet_row["id"]
+        self.status_var.set(f"從資料庫載入 {chain} 地址資料中…")
+
+        def _load():
+            try:
+                profile = _db.load_profile_from_db(wallet_id, chain, address, wallet_row)
+                self.after(0, self._update_ui, profile)
+            except Exception as e:
+                self.after(0, self.status_var.set, f"資料庫載入失敗：{e}")
+
+        threading.Thread(target=_load, daemon=True).start()
+
     # ── 地址側寫分頁 ──────────────────────────────────────────────────────────
 
     def _build_profile_tab(self, parent: ctk.CTkFrame):
@@ -2404,13 +2419,16 @@ class App(ctk.CTk):
                 f"請至區塊鏈瀏覽器確認：\n{explorer}")
             self.status_var.set("查無資料｜請確認地址是否正確")
         else:
-            mode = self._query_mode.get()
-            if mode == "一般查詢":
-                saved_hint = "【一般查詢－未儲存至資料庫】"
+            if p.get("_from_db"):
+                saved_hint = "【資料庫快取－無需重新查詢】"
             else:
-                case_hint = (f"已存入案件【{self._active_case['case_number']}】"
-                             if self._active_case else "已儲存（未關聯案件）")
-                saved_hint = f"【專案查詢－{case_hint}】"
+                mode = self._query_mode.get()
+                if mode == "一般查詢":
+                    saved_hint = "【一般查詢－未儲存至資料庫】"
+                else:
+                    case_hint = (f"已存入案件【{self._active_case['case_number']}】"
+                                 if self._active_case else "已儲存（未關聯案件）")
+                    saved_hint = f"【專案查詢－{case_hint}】"
             self.status_var.set(
                 f"分析完成｜共 {total} 筆交易｜"
                 f"授權 {len(p.get('approval_targets',[]))} 筆　{saved_hint}")

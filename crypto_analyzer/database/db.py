@@ -482,6 +482,107 @@ def get_wallet_approvals(wallet_id: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def get_wallet_by_address(chain: str, address: str) -> dict | None:
+    with _conn() as con:
+        row = con.execute(
+            "SELECT * FROM wallets WHERE chain=? AND address=?", (chain, address)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def load_profile_from_db(wallet_id: int, chain: str, address: str, wallet_row: dict) -> dict:
+    """從資料庫重建 profile dict，供 _update_ui 直接呼叫（無需重新查詢 API）。"""
+    txs = get_wallet_transactions(wallet_id)
+    approvals_rows = get_wallet_approvals(wallet_id)
+
+    raw_txs, raw_erc20, raw_trc20 = [], [], []
+    erc20_out: dict = {}
+    erc20_in:  dict = {}
+    trc20_out: dict = {}
+    trc20_in:  dict = {}
+    trx_out_count = trx_in_count = 0
+    trc20_out_count = trc20_in_count = 0
+
+    addr_lower = address.lower()
+    for row in txs:
+        try:
+            original = json.loads(row.get("raw_json") or "{}")
+        except Exception:
+            original = {}
+        tx_type = row.get("tx_type", "")
+        from_l  = (row.get("from_addr") or "").lower()
+
+        if tx_type in ("normal", "btc"):
+            raw_txs.append(original)
+            if chain == "TRX":
+                if from_l == addr_lower:
+                    trx_out_count += 1
+                else:
+                    trx_in_count += 1
+        elif tx_type == "erc20":
+            raw_erc20.append(original)
+            sym = row.get("token_symbol") or ""
+            amt = float(row.get("token_amount") or 0)
+            if from_l == addr_lower:
+                erc20_out[sym] = erc20_out.get(sym, 0.0) + amt
+            else:
+                erc20_in[sym] = erc20_in.get(sym, 0.0) + amt
+        elif tx_type == "trc20":
+            raw_trc20.append(original)
+            sym = row.get("token_symbol") or ""
+            amt = float(row.get("token_amount") or 0)
+            if from_l == addr_lower:
+                trc20_out[sym] = trc20_out.get(sym, 0.0) + amt
+                trc20_out_count += 1
+            else:
+                trc20_in[sym] = trc20_in.get(sym, 0.0) + amt
+                trc20_in_count += 1
+
+    approval_targets = [
+        {"tx_hash": r["tx_hash"], "contract": r["contract"],
+         "spender": r["spender"], "amount": r["amount"], "time": r["time"]}
+        for r in approvals_rows
+    ]
+
+    out_k, in_k, fee_k = {
+        "ETH": ("out_total_eth", "in_total_eth",  "total_fee_eth"),
+        "TRX": ("out_total_trx", "in_total_trx",  "total_fee_trx"),
+        "BTC": ("out_total_btc", "in_total_btc",  "total_fee_btc"),
+    }.get(chain, ("out_total_eth", "in_total_eth", "total_fee_eth"))
+
+    profile = {
+        "chain":           chain,
+        "address":         address,
+        "first_tx_time":   wallet_row.get("first_tx_time"),
+        "last_tx_time":    wallet_row.get("last_tx_time"),
+        "first_source":    wallet_row.get("first_source"),
+        "out_count":       wallet_row.get("out_count", 0),
+        "in_count":        wallet_row.get("in_count",  0),
+        "eth_out_count":   wallet_row.get("eth_out_count", 0),
+        "eth_in_count":    wallet_row.get("eth_in_count",  0),
+        "erc20_out_count": wallet_row.get("erc20_out_count", 0),
+        "erc20_in_count":  wallet_row.get("erc20_in_count",  0),
+        "trx_out_count":   trx_out_count,
+        "trx_in_count":    trx_in_count,
+        "trc20_out_count": trc20_out_count,
+        "trc20_in_count":  trc20_in_count,
+        out_k:             wallet_row.get("out_total", 0),
+        in_k:              wallet_row.get("in_total",  0),
+        fee_k:             wallet_row.get("total_fee", 0),
+        "top_fee_dest":    wallet_row.get("top_fee_dest"),
+        "erc20_out_by_token": erc20_out,
+        "erc20_in_by_token":  erc20_in,
+        "trc20_out_by_token": trc20_out,
+        "trc20_in_by_token":  trc20_in,
+        "raw_txs":         raw_txs,
+        "raw_erc20":       raw_erc20,
+        "raw_trc20":       raw_trc20,
+        "approval_targets": approval_targets,
+        "_from_db":        True,
+    }
+    return profile
+
+
 def get_all_tx_lookups() -> list[dict]:
     with _conn() as con:
         rows = con.execute(
