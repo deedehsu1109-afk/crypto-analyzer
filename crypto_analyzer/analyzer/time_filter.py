@@ -47,7 +47,8 @@ def get_tx_ts(tx: dict, chain: str) -> int:
         except (ValueError, TypeError):
             return 0
     elif chain == "TRX":
-        raw = tx.get("timestamp", 0)
+        # 原生 TRX 用 "timestamp"；TRC-20 轉帳用 "block_ts"（兩者均為毫秒）
+        raw = tx.get("timestamp") or tx.get("block_ts", 0)
         try:
             ts = int(raw)
             return ts // 1000 if ts > 1e12 else ts

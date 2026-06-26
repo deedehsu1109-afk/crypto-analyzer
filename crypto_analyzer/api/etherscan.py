@@ -1,5 +1,6 @@
 import requests
 import time
+from api.errors import TooManyRecordsError
 
 _V2_URL        = "https://api.etherscan.io/v2/chainquery"
 _V1_URL        = "https://api.etherscan.io/api"
@@ -83,7 +84,8 @@ class EtherscanAPI:
         except (ValueError, TypeError):
             return 0.0
 
-    def get_normal_transactions(self, address: str) -> list[dict]:
+    def get_normal_transactions(self, address: str,
+                                max_records: int = None) -> list[dict]:
         # Etherscan Free tier 2026-07-01 起每次最多回傳 1000 筆
         results, page = [], 1
         while True:
@@ -97,6 +99,8 @@ class EtherscanAPI:
             if not isinstance(txs, list) or not txs:
                 break
             results.extend(txs)
+            if max_records and len(results) >= max_records:
+                raise TooManyRecordsError(len(results))
             if len(txs) < 1000:
                 break
             page += 1
@@ -124,7 +128,8 @@ class EtherscanAPI:
             time.sleep(0.3)
         return results
 
-    def get_erc20_transfers(self, address: str) -> list[dict]:
+    def get_erc20_transfers(self, address: str,
+                            max_records: int = None) -> list[dict]:
         # Etherscan Free tier 2026-07-01 起每次最多回傳 1000 筆
         results, page = [], 1
         while True:
@@ -139,6 +144,8 @@ class EtherscanAPI:
             if not isinstance(txs, list) or not txs:
                 break
             results.extend(txs)
+            if max_records and len(results) >= max_records:
+                raise TooManyRecordsError(len(results))
             if len(txs) < 1000:
                 break
             page += 1

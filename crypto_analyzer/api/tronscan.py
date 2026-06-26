@@ -1,5 +1,6 @@
 import requests
 import time
+from api.errors import TooManyRecordsError
 
 BASE_URL = "https://apilist.tronscanapi.com/api"
 
@@ -33,10 +34,34 @@ class TronScanAPI:
         balance_sun = data.get("balance", 0)
         return balance_sun / 1_000_000
 
+    def get_transaction_count(self, address: str,
+                               start_ts: int = None, end_ts: int = None) -> int:
+        """取得指定時間範圍內的交易總筆數。
+        優先使用 rangeTotal（時間篩選後的計數），其次 total（地址全部總數）。
+        回傳 0 代表 API 不支援此欄位或確實無資料。
+        """
+        params: dict = {"address": address, "limit": 1}
+        if start_ts:
+            params["min_timestamp"] = start_ts * 1000
+        if end_ts:
+            params["max_timestamp"] = end_ts * 1000
+        data = self._get("transaction", params)
+        # rangeTotal = 時間範圍內的計數（有 min/max_timestamp 時才有意義）
+        # total = 地址全部交易數（不受時間參數影響，不可用於計算 offset）
+        raw = data.get("rangeTotal")
+        if raw is None:
+            raw = data.get("total", 0)
+        try:
+            return int(raw)
+        except (ValueError, TypeError):
+            return 0
+
     def get_transactions(self, address: str, limit: int = 10000,
-                         start_ts: int = None, end_ts: int = None) -> list[dict]:
+                         start_ts: int = None, end_ts: int = None,
+                         max_records: int = None,
+                         start_offset: int = 0) -> list[dict]:
         results = []
-        start = 0
+        start = start_offset
         page_size = 50
         # 移除 sort=-timestamp（已不被接受），端點預設即為時間降序
         params_base: dict = {
@@ -54,6 +79,8 @@ class TronScanAPI:
             if not txs:
                 break
             results.extend(txs)
+            if max_records and len(results) >= max_records:
+                raise TooManyRecordsError(len(results))
             if len(txs) < page_size:
                 break
             start += page_size
@@ -61,7 +88,8 @@ class TronScanAPI:
         return results[:limit]
 
     def get_trc20_transfers(self, address: str, limit: int = 10000,
-                            start_ts: int = None, end_ts: int = None) -> list[dict]:
+                            start_ts: int = None, end_ts: int = None,
+                            max_records: int = None) -> list[dict]:
         results = []
         start = 0
         page_size = 50
@@ -81,6 +109,8 @@ class TronScanAPI:
             if not txs:
                 break
             results.extend(txs)
+            if max_records and len(results) >= max_records:
+                raise TooManyRecordsError(len(results))
             if len(txs) < page_size:
                 break
             start += page_size

@@ -10,10 +10,11 @@ from config import load_config, save_config
 from api.etherscan import EtherscanAPI
 from api.tronscan import TronScanAPI
 from api.bitcoin import BitcoinAPI
+from api.errors import TooManyRecordsError
 from analyzer.wallet_profiler import profile_eth, profile_trx, profile_btc
 from analyzer.tx_analyzer import analyze_eth_tx, analyze_trx_tx, analyze_btc_tx
 from analyzer.time_filter import (parse_datetime_str, ts_to_str,
-                                   filter_by_range, filter_centered,
+                                   filter_by_range, filter_centered, get_tx_ts,
                                    check_overflow, suggest_increase, MAX_TOTAL)
 from exporter.report import export_excel, export_csv
 from database import db as _db
@@ -871,6 +872,11 @@ class App(ctk.CTk):
         self.addr_entry.insert(0, address)
         self._data_tabs.set("🔍  地址側寫")
 
+        # 有目前案件時自動切為專案查詢，確保查詢結果存入案件
+        if self._active_case and self._query_mode.get() != "專案查詢":
+            self._query_mode.set("專案查詢")
+            self._on_mode_change("專案查詢")
+
         wallet_row = _db.get_wallet_by_address(chain, address)
         if wallet_row is None:
             return
@@ -958,6 +964,21 @@ class App(ctk.CTk):
             command=self._add_to_flow_graph)
         self.flow_btn.grid(row=0, column=9, padx=(2, 8), pady=8)
 
+        # 查詢進度列（row=1）：進度條 + 步驟文字
+        self._query_progress_bar = ctk.CTkProgressBar(
+            top, mode="indeterminate", height=6, corner_radius=0)
+        self._query_progress_bar.grid(
+            row=1, column=0, columnspan=10, sticky="ew", padx=0, pady=0)
+        self._query_progress_bar.set(0)
+        self._query_progress_bar.grid_remove()
+
+        self._query_step_lbl = ctk.CTkLabel(
+            top, text="", font=("Microsoft JhengHei", 10),
+            text_color="#5fa8d3", anchor="w")
+        self._query_step_lbl.grid(
+            row=2, column=0, columnspan=10, sticky="ew", padx=10, pady=(2, 4))
+        self._query_step_lbl.grid_remove()
+
         # 時間篩選
         tf_wrap = ctk.CTkFrame(parent, fg_color="transparent")
         tf_wrap.grid(row=1, column=0, sticky="ew", padx=4, pady=(0, 2))
@@ -970,25 +991,45 @@ class App(ctk.CTk):
         self._time_bar = ctk.CTkFrame(tf_wrap, corner_radius=6, fg_color="#1e1e2e")
         self._build_time_bar(self._time_bar)
 
-        # ── 上方固定區域：錢包摘要 ＋ 授權對象 ──
-        top_info = ctk.CTkFrame(parent, corner_radius=8, height=260)
+        # ── 上方：摘要 ＋ 授權對象（按鈕折疊，預設隱藏） ──
+        top_info = ctk.CTkFrame(parent, corner_radius=8)
         top_info.grid(row=2, column=0, sticky="ew", padx=4, pady=(0, 2))
-        top_info.grid_propagate(False)
-        top_info.grid_columnconfigure(0, weight=3)
-        top_info.grid_columnconfigure(1, weight=0)
-        top_info.grid_columnconfigure(2, weight=2)
-        top_info.grid_rowconfigure(0, weight=1)
+        top_info.grid_columnconfigure(0, weight=1)
 
-        summary_f = ctk.CTkFrame(top_info, fg_color="transparent")
-        summary_f.grid(row=0, column=0, sticky="nsew", padx=(4, 0), pady=4)
-        self._build_summary_section(summary_f)
+        # 按鈕列（常駐顯示）
+        _btn_bar = ctk.CTkFrame(top_info, fg_color="transparent")
+        _btn_bar.grid(row=0, column=0, sticky="ew", padx=4, pady=(6, 6))
 
-        ctk.CTkFrame(top_info, width=1, fg_color="#2a3556").grid(
-            row=0, column=1, sticky="ns", padx=4, pady=8)
+        self._summary_visible   = False
+        self._approvals_visible = False
 
-        approvals_f = ctk.CTkFrame(top_info, fg_color="transparent")
-        approvals_f.grid(row=0, column=2, sticky="nsew", padx=(0, 4), pady=4)
-        self._build_approvals_section(approvals_f)
+        self._summary_btn = ctk.CTkButton(
+            _btn_bar, text="錢包摘要 ▼", width=130,
+            font=("Microsoft JhengHei", 11),
+            fg_color="#1e3a5f", hover_color="#2a4a7f",
+            command=self._toggle_summary)
+        self._summary_btn.pack(side="left", padx=(4, 8))
+
+        self._approval_btn = ctk.CTkButton(
+            _btn_bar, text="無授權對象", width=160,
+            font=("Microsoft JhengHei", 11),
+            fg_color="gray30", hover_color="gray40",
+            command=self._toggle_approvals)
+        self._approval_btn.pack(side="left", padx=4)
+
+        # 錢包摘要內容（預設隱藏，固定高度 230px）
+        self._summary_content = ctk.CTkFrame(top_info, fg_color="transparent", height=230)
+        self._summary_content.grid(row=1, column=0, sticky="ew", padx=4, pady=(0, 4))
+        self._summary_content.grid_propagate(False)
+        self._summary_content.grid_remove()
+        self._build_summary_section(self._summary_content)
+
+        # 授權對象內容（預設隱藏，固定高度 150px）
+        self._approvals_content = ctk.CTkFrame(top_info, fg_color="transparent", height=150)
+        self._approvals_content.grid(row=2, column=0, sticky="ew", padx=4, pady=(0, 4))
+        self._approvals_content.grid_propagate(False)
+        self._approvals_content.grid_remove()
+        self._build_approvals_section(self._approvals_content)
 
         # ── 交易篩選列（雙列） ──
         self._dust_filter_var  = tk.BooleanVar(value=False)
@@ -1108,6 +1149,22 @@ class App(ctk.CTk):
         else:
             self._time_bar.pack_forget()
             self._time_toggle_btn.configure(text="⏱ 時間篩選 ▼")
+
+    def _toggle_summary(self):
+        self._summary_visible = not self._summary_visible
+        if self._summary_visible:
+            self._summary_content.grid()
+            self._summary_btn.configure(text="錢包摘要 ▲")
+        else:
+            self._summary_content.grid_remove()
+            self._summary_btn.configure(text="錢包摘要 ▼")
+
+    def _toggle_approvals(self):
+        self._approvals_visible = not self._approvals_visible
+        if self._approvals_visible:
+            self._approvals_content.grid()
+        else:
+            self._approvals_content.grid_remove()
 
     def _build_summary_section(self, parent: ctk.CTkFrame):
         parent.grid_columnconfigure(0, weight=1)
@@ -2069,53 +2126,138 @@ class App(ctk.CTk):
                                    "請先在右上角「⚙ 設定」中填入 Etherscan API Key")
             return
         tf = self._get_time_filter()
-        self.analyze_btn.configure(state="disabled")
+        no_limit = getattr(self, '_no_limit_next', False)
+        self._no_limit_next = False
+        self.analyze_btn.configure(state="disabled", text="查詢中…")
         self.status_var.set("分析中，請稍候...")
         self.progress.grid()
         self.progress.start()
+        self._query_progress_bar.grid()
+        self._query_progress_bar.start()
+        self._query_step_lbl.configure(text="⏳ 正在連接 API…")
+        self._query_step_lbl.grid()
         self._profile = None
         threading.Thread(target=self._run_analysis,
-                         args=(chain, address, tf), daemon=True).start()
+                         args=(chain, address, tf, no_limit), daemon=True).start()
 
-    def _run_analysis(self, chain: str, address: str, tf: dict | None):
+    def _run_analysis(self, chain: str, address: str, tf: dict | None,
+                      no_limit: bool = False):
+        # 無時間篩選且未被使用者強制取消上限時，啟用早期中止保護
+        max_r = MAX_TOTAL if not (tf or no_limit) else None
         try:
             if chain == "ETH":
                 api = EtherscanAPI(self.config_data["etherscan_api_key"])
                 ver = "V2" if api._use_v2 else "V1"
-                self._set_status(f"使用 Etherscan {ver} API，正在抓取 ETH 一般交易...")
-                txs       = api.get_normal_transactions(address)
-                self._set_status("正在抓取 Internal 交易...")
+                self._set_query_step(f"使用 Etherscan {ver} API，正在抓取 ETH 一般交易...")
+                txs       = api.get_normal_transactions(address, max_records=max_r)
+                self._set_query_step("正在抓取 Internal 交易...")
                 int_txs   = api.get_internal_transactions(address)
-                self._set_status("正在抓取 ERC-20 轉帳記錄...")
-                erc20     = api.get_erc20_transfers(address)
-                self._set_status("正在分析授權紀錄...")
+                remaining = (max_r - len(txs)) if max_r is not None else None
+                self._set_query_step("正在抓取 ERC-20 轉帳記錄...")
+                erc20     = api.get_erc20_transfers(address, max_records=remaining)
+                self._set_query_step("正在分析授權紀錄...")
                 approvals = api.get_token_approvals(txs, address)
                 profile   = profile_eth(address, txs, int_txs, erc20, approvals)
                 total_raw = len(txs) + len(erc20)
                 detail    = f"原生交易 {len(txs)} 筆、ERC-20 轉帳 {len(erc20)} 筆"
             elif chain == "TRX":
                 api = TronScanAPI(self.config_data.get("trongrid_api_key", ""))
-                self._set_status("正在抓取 TRX 交易資料...")
-                s_ts = tf["start_ts"] if tf and tf["mode"] == "range" else None
-                e_ts = tf["end_ts"]   if tf and tf["mode"] == "range" else None
-                txs       = api.get_transactions(address, start_ts=s_ts, end_ts=e_ts)
-                self._set_status("正在抓取 TRC-20 轉帳...")
-                trc20     = api.get_trc20_transfers(address, start_ts=s_ts, end_ts=e_ts)
-                self._set_status("正在分析授權紀錄...")
+                is_center = tf and tf["mode"] == "center"
+
+                if tf and tf["mode"] == "range":
+                    self._set_query_step("正在抓取 TRX 交易資料（範圍篩選）...")
+                    s_ts, e_ts = tf["start_ts"], tf["end_ts"]
+                    txs = api.get_transactions(address, start_ts=s_ts, end_ts=e_ts,
+                                               max_records=max_r)
+                elif is_center:
+                    # 置中模式：TronScan 預設降序
+                    # 軸心前：max_timestamp=pivot → 降序第一頁即最接近 pivot 的 N 筆
+                    # 軸心後：漸進擴大時間窗口，找到「窗口內所有記錄可全量取回且 >= each」的最小窗口；
+                    #         因為可全量取回（< 10000 筆），排序後取最舊 N 筆即為 pivot 後最早的交易。
+                    #         若窗口超過 10001 筆（TooManyRecordsError），用上一個窗口的最佳結果。
+                    s_ts = e_ts = None
+                    center_ts = tf["start_ts"]
+                    each = tf["each_side"]
+
+                    self._set_query_step("正在抓取 TRX 軸心前交易...")
+                    before_list = api.get_transactions(address, end_ts=center_ts, limit=each)
+
+                    self._set_query_step("正在搜尋軸心後最適查詢窗口...")
+                    after_list = []
+                    _best_raw: list = []  # 最近一次未飽和的全量結果
+                    for _w in [600, 1800, 3600, 21600, 86400, 259200, 604800, 2592000]:
+                        try:
+                            raw_w = api.get_transactions(
+                                address, start_ts=center_ts, end_ts=center_ts + _w,
+                                limit=99999, max_records=10001)
+                            _best_raw = raw_w  # 未飽和，存為最佳候選
+                            if len(raw_w) >= each:
+                                # 已有足夠筆數，取最舊 each 筆即為軸心後最早的交易
+                                self._set_query_step("正在整理 TRX 軸心後交易...")
+                                raw_w.sort(key=lambda t: get_tx_ts(t, "TRX"))
+                                after_list = raw_w[:each]
+                                break
+                            # 不足 each 筆，嘗試更大窗口
+                        except TooManyRecordsError:
+                            # 此窗口已飽和，使用上一個未飽和窗口的最佳結果
+                            if _best_raw:
+                                _best_raw.sort(key=lambda t: get_tx_ts(t, "TRX"))
+                                after_list = _best_raw[:each]
+                            break  # 更大窗口必然也飽和，不繼續嘗試
+
+                    if not after_list and _best_raw:
+                        # 遍歷完所有窗口仍不足 each 筆（低頻地址），取現有全部
+                        _best_raw.sort(key=lambda t: get_tx_ts(t, "TRX"))
+                        after_list = _best_raw[:each]
+
+                    txs = before_list + after_list
+                else:
+                    self._set_query_step("正在抓取 TRX 交易資料...")
+                    s_ts = e_ts = None
+                    txs = api.get_transactions(address, max_records=max_r)
+
+                remaining = (max_r - len(txs)) if max_r is not None else None
+                self._set_query_step("正在抓取 TRC-20 轉帳...")
+                if is_center:
+                    # 置中模式 TRC-20：與 TRX 相同的漸進窗口策略（以 center_ts 為中心 ±window）
+                    # 確保窗口內 TRC-20 可全量取回，排序後由 filter_centered 選出軸心附近的記錄
+                    _trc20_best: list = []
+                    for _wt in [3600, 21600, 86400, 259200, 604800]:
+                        try:
+                            raw_trc = api.get_trc20_transfers(
+                                address,
+                                start_ts=center_ts - _wt, end_ts=center_ts + _wt,
+                                limit=99999, max_records=10001)
+                            _trc20_best = raw_trc
+                            if len(raw_trc) >= each:
+                                break  # 已取得足夠筆數，停止擴大
+                            # 不足 each 筆，嘗試更大窗口
+                        except TooManyRecordsError:
+                            break  # 飽和，沿用上一個窗口的最佳結果
+                    trc20 = _trc20_best
+                else:
+                    trc20_start, trc20_end = s_ts, e_ts
+                    if trc20_start is None and tf:
+                        trc20_start = tf["start_ts"] - 86400 * 90
+                        trc20_end   = tf["start_ts"] + 86400 * 90
+                    trc20 = api.get_trc20_transfers(address, start_ts=trc20_start,
+                                                    end_ts=trc20_end,
+                                                    max_records=remaining)
+                self._set_query_step("正在分析授權紀錄...")
                 approvals = api.get_token_approvals(txs, address)
                 profile   = profile_trx(address, txs, trc20, approvals)
                 total_raw = len(txs) + len(trc20)
                 detail    = f"原生交易 {len(txs)} 筆、TRC-20 轉帳 {len(trc20)} 筆"
             else:
                 api = BitcoinAPI()
-                self._set_status("正在抓取 BTC 交易資料...")
-                txs     = api.get_transactions(address)
+                self._set_query_step("正在抓取 BTC 交易資料...")
+                txs     = api.get_transactions(address, max_records=max_r)
                 profile = profile_btc(address, txs)
                 total_raw = len(txs)
                 detail    = f"交易 {len(txs)} 筆"
 
-            # ── 原始資料超量警告（無時間篩選時） ──
-            if total_raw > MAX_TOTAL and not tf:
+            # ── 原始資料超量警告（no_limit 模式：使用者確認後仍全量抓取） ──
+            if total_raw > MAX_TOTAL and not tf and no_limit:
                 import queue as _queue
                 q = _queue.Queue()
                 self.after(0, self._show_overflow_dialog,
@@ -2127,7 +2269,7 @@ class App(ctk.CTk):
                     return
 
             if tf and not (chain == "TRX" and tf["mode"] == "range"):
-                self._set_status("正在套用時間篩選...")
+                self._set_query_step("正在套用時間篩選...")
                 profile = self._apply_time_filter_sync(profile, tf)
 
             self._profile = profile
@@ -2139,6 +2281,8 @@ class App(ctk.CTk):
                 except Exception:
                     pass
             self.after(0, self._update_ui, profile)
+        except TooManyRecordsError as exc:
+            self.after(0, self._on_too_many_records, exc.count, chain, address)
         except Exception as e:
             self.after(0, self._on_error, str(e))
 
@@ -2201,17 +2345,30 @@ class App(ctk.CTk):
             except Exception:
                 ms = 0
             pivot_time = ts_to_str(ms) if ms else "N/A"
-            profile["raw_txs"] = res["result"]
-            if "raw_erc20" in profile: profile["raw_erc20"] = []
-            if "raw_trc20" in profile: profile["raw_trc20"] = []
+            # 用物件 id 將混合結果拆回各自的分類，保留各欄位正確格式
+            raw_ids   = {id(tx) for tx in raw}
+            erc20_ids = {id(tx) for tx in erc20}
+            trc20_ids = {id(tx) for tx in trc20}
+            profile["raw_txs"] = [tx for tx in res["result"] if id(tx) in raw_ids]
+            if "raw_erc20" in profile:
+                profile["raw_erc20"] = [tx for tx in res["result"] if id(tx) in erc20_ids]
+            if "raw_trc20" in profile:
+                profile["raw_trc20"] = [tx for tx in res["result"] if id(tx) in trc20_ids]
+            n_raw   = len(profile["raw_txs"])
+            n_token = len(profile.get("raw_erc20", [])) + len(profile.get("raw_trc20", []))
             profile["_time_filter_applied"] = (
                 f"置中篩選 軸心 {ts_to_str(tf['start_ts'])}（最近 {pivot_time}），"
-                f"前 {res['before']} 筆＋後 {res['after']} 筆，共 {len(res['result'])} 筆"
+                f"前 {res['before']} 筆＋後 {res['after']} 筆，"
+                f"共 {n_raw} 筆原生交易＋{n_token} 筆 Token 轉帳"
             )
         return profile
 
     def _set_status(self, msg: str):
         self.after(0, self.status_var.set, msg)
+
+    def _set_query_step(self, msg: str):
+        self.after(0, self.status_var.set, msg)
+        self.after(0, self._query_step_lbl.configure, {"text": "⏳ " + msg})
 
     def _on_error(self, msg: str):
         self._stop_progress()
@@ -2220,7 +2377,96 @@ class App(ctk.CTk):
     def _stop_progress(self):
         self.progress.stop()
         self.progress.grid_remove()
-        self.analyze_btn.configure(state="normal")
+        self._query_progress_bar.stop()
+        self._query_progress_bar.grid_remove()
+        self._query_step_lbl.configure(text="")
+        self._query_step_lbl.grid_remove()
+        self.analyze_btn.configure(state="normal", text="開始查詢")
+
+    def _on_too_many_records(self, count: int, chain: str, address: str):
+        """查詢中途超過 MAX_TOTAL 筆時立即中止，主執行緒呼叫此對話框。"""
+        self._stop_progress()
+        self._set_status(f"查詢中止｜抓取到 {count:,} 筆時已超過 {MAX_TOTAL:,} 筆上限")
+
+        _CHAIN_PATH = {"ETH": "eth", "TRX": "tron", "BTC": "btc"}
+        chain_path = _CHAIN_PATH.get(chain, chain.lower())
+        oklink_url = f"https://www.oklink.com/zh-hant/{chain_path}/address/{address}"
+
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("查詢中止 — 超過 1,000 筆")
+        dlg.geometry("560x360")
+        dlg.resizable(False, False)
+        dlg.grab_set()
+        dlg.focus_force()
+        dlg.protocol("WM_DELETE_WINDOW", dlg.destroy)
+
+        body = ctk.CTkFrame(dlg, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=20, pady=16)
+
+        ctk.CTkLabel(body,
+            text=f"🛑  抓取到 {count:,} 筆時已超過上限，查詢已立即停止",
+            font=("Microsoft JhengHei", 14, "bold"),
+            text_color="#ff6b6b").pack(anchor="w")
+
+        ctk.CTkLabel(body,
+            text=f"此地址交易量龐大（已知至少 {count:,} 筆），繼續全量抓取將耗費大量時間。",
+            font=("Microsoft JhengHei", 11),
+            text_color="gray70").pack(anchor="w", pady=(4, 10))
+
+        ctk.CTkLabel(body,
+            text="建議做法：\n"
+                 "  1. 點擊「⏱ 設定時間篩選」，縮小查詢日期區間後重新查詢\n"
+                 "  2. 於 OKLink 確認此地址是否為交易所錢包（具水庫標籤），\n"
+                 "     再決定是否需要全量資料\n\n"
+                 "若確認需要全部資料，可選擇「繼續查詢全部」（可能需數分鐘）。",
+            font=("Microsoft JhengHei", 11),
+            justify="left",
+            text_color="gray85").pack(anchor="w")
+
+        link_frame = ctk.CTkFrame(body, fg_color="#1a2a3a", corner_radius=6)
+        link_frame.pack(fill="x", pady=(10, 4))
+        ctk.CTkLabel(link_frame,
+            text="🔗  OKLink 地址查詢：",
+            font=("Microsoft JhengHei", 10),
+            text_color="gray60").pack(side="left", padx=(10, 4), pady=6)
+        url_lbl = ctk.CTkLabel(link_frame,
+            text=oklink_url,
+            font=("Consolas", 10),
+            text_color="#4da6ff",
+            cursor="hand2")
+        url_lbl.pack(side="left", pady=6)
+        url_lbl.bind("<Button-1>", lambda _: webbrowser.open(oklink_url))
+        ctk.CTkButton(link_frame,
+            text="開啟", width=55, height=24,
+            font=("Microsoft JhengHei", 10),
+            fg_color="#1f538d",
+            command=lambda: webbrowser.open(oklink_url)).pack(
+            side="right", padx=8, pady=4)
+
+        btn_frame = ctk.CTkFrame(body, fg_color="transparent")
+        btn_frame.pack(fill="x", pady=(12, 0))
+
+        def _use_filter():
+            dlg.destroy()
+            self._show_case_data_tab("🔍  地址側寫")
+            if not self._time_bar_visible:
+                self._toggle_time_bar()
+
+        def _continue_all():
+            dlg.destroy()
+            self._no_limit_next = True
+            self._start_analysis()
+
+        ctk.CTkButton(btn_frame,
+            text="⏱  設定時間篩選（建議）",
+            width=210, font=("Microsoft JhengHei", 11, "bold"),
+            fg_color="#1f538d", hover_color="#2a6aad",
+            command=_use_filter).pack(side="left")
+        ctk.CTkButton(btn_frame,
+            text="繼續查詢全部資料",
+            width=170, font=("Microsoft JhengHei", 11),
+            fg_color="gray30", hover_color="gray40",
+            command=_continue_all).pack(side="right")
 
     def _show_overflow_dialog(self, total_raw: int, detail: str,
                                address: str, chain: str, result_queue):
@@ -2386,6 +2632,22 @@ class App(ctk.CTk):
                 a.get("contract",""), a.get("spender",""),
                 a.get("tx_hash", a.get("amount","")), a.get("time",""),
             ))
+
+        # 更新授權按鈕文字與顏色
+        approval_count = len(p.get("approval_targets", []))
+        if hasattr(self, "_approval_btn"):
+            if approval_count > 0:
+                self._approval_btn.configure(
+                    text=f"⚠ 有授權對象（{approval_count} 筆）",
+                    fg_color="#7a1f1f",
+                    hover_color="#9a2f2f"
+                )
+            else:
+                self._approval_btn.configure(
+                    text="無授權對象",
+                    fg_color="gray30",
+                    hover_color="gray40"
+                )
 
         tx_rows, token_rows = self._normalize_for_display(p)
         self._tx_rows_base    = tx_rows

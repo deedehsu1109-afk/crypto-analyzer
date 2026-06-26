@@ -1,5 +1,6 @@
 import requests
 import time
+from api.errors import TooManyRecordsError
 
 BASE_URL = "https://blockchain.info"
 
@@ -29,7 +30,8 @@ class BitcoinAPI:
         satoshi = data.get(address, {}).get("final_balance", 0)
         return satoshi / 1e8
 
-    def get_transactions(self, address: str, limit: int = 5000) -> list[dict]:
+    def get_transactions(self, address: str, limit: int = 5000,
+                         max_records: int = None) -> list[dict]:
         results = []
         offset = 0
         page_size = 50
@@ -42,6 +44,8 @@ class BitcoinAPI:
             if not txs:
                 break
             results.extend(txs)
+            if max_records and len(results) >= max_records:
+                raise TooManyRecordsError(len(results))
             if len(txs) < page_size:
                 break
             offset += page_size
