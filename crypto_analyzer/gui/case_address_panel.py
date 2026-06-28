@@ -5,6 +5,7 @@ from tkinter import ttk, messagebox, filedialog
 import customtkinter as ctk
 
 from database import db as _db
+from api.label_fetcher import get_label
 
 _ADDR_TYPES   = ["加密錢包", "金融帳戶"]
 _HOLDER_ROLES = ["不明", "被害人", "嫌疑人", "中間人"]
@@ -109,7 +110,17 @@ class AddressDialog(ctk.CTkToplevel):
 
         # 標記說明
         self._lbl(f, "標記說明：", 4)
-        self.label_e = self._entry(f, 4, "如：被害人OKX帳戶 / 詐騙收款錢包")
+        label_row = ctk.CTkFrame(f, fg_color="transparent")
+        label_row.grid(row=4, column=1, padx=(4, 12), pady=5, sticky="w")
+        self.label_e = ctk.CTkEntry(label_row, font=("Consolas", 11),
+                                     placeholder_text="如：被害人OKX帳戶 / 詐騙收款錢包",
+                                     width=240)
+        self.label_e.pack(side="left")
+        self._fetch_btn = ctk.CTkButton(label_row, text="🔍 查標籤", width=80,
+                                         font=("Microsoft JhengHei", 10),
+                                         fg_color="#2a4a6a",
+                                         command=self._fetch_label)
+        self._fetch_btn.pack(side="left", padx=(6, 0))
 
         # 備註
         self._lbl(f, "備註：", 5)
@@ -150,6 +161,32 @@ class AddressDialog(ctk.CTkToplevel):
         self.label_e.insert(0, row.get("label", "") or "")
         self.notes_e.delete(0, "end")
         self.notes_e.insert(0, row.get("notes", "") or "")
+
+    def _fetch_label(self):
+        addr = self.addr_e.get().strip()
+        chain = self._chain_var.get() if self._type_var.get() == "加密錢包" else ""
+        if not addr:
+            messagebox.showwarning("缺少資料", "請先輸入地址", parent=self)
+            return
+        if chain not in ("BTC", "TRX"):
+            messagebox.showinfo("不支援", f"目前僅支援 BTC / TRX 自動查標籤\n（{chain} 尚未支援）",
+                                parent=self)
+            return
+        self._fetch_btn.configure(text="查詢中…", state="disabled")
+
+        def _query():
+            label = get_label(addr, chain)
+            self.after(0, lambda: self._apply_label(label))
+
+        threading.Thread(target=_query, daemon=True).start()
+
+    def _apply_label(self, label: str | None):
+        self._fetch_btn.configure(text="🔍 查標籤", state="normal")
+        if label:
+            self.label_e.delete(0, "end")
+            self.label_e.insert(0, label)
+        else:
+            messagebox.showinfo("查無標籤", "此地址在資料來源中沒有標籤記錄", parent=self)
 
     def _save(self):
         addr = self.addr_e.get().strip()
@@ -219,6 +256,7 @@ class CaseAddressPanel(ctk.CTkFrame):
             ("✕ 刪除", self._delete,      "#7a1f1f"),
             ("📂 從文件提取", self._import_doc, "#4a3a7a"),
             ("⇒ 加入幣流圖", self._to_flow_graph, "#5a4a2a"),
+            ("🔍 批次查標籤", self._batch_fetch_labels, "#2a5a5a"),
         ]:
             ctk.CTkButton(bar, text=text, width=110,
                           font=("Microsoft JhengHei", 10),
@@ -381,3 +419,41 @@ class CaseAddressPanel(ctk.CTkFrame):
                             f"已標記 {len(added)} 個地址，\n"
                             "請切換至「幣流關聯圖」分頁確認。",
                             parent=self)
+
+    def _batch_fetch_labels(self):
+        """批次查詢所有 BTC/TRX 地址的標籤（僅更新標記說明為空的記錄）"""
+        rows = _db.get_case_addresses(self.case_id)
+        targets = [
+            r for r in rows
+            if r.get("addr_type") == "加密錢包"
+            and r.get("chain_institution") in ("BTC", "TRX")
+            and not r.get("label")
+        ]
+        if not targets:
+            messagebox.showinfo("無需查詢",
+                                "沒有待查標籤的 BTC/TRX 地址\n（已有標記說明的地址不會被覆蓋）",
+                                parent=self)
+            return
+
+        if not messagebox.askyesno("批次查標籤",
+                                    f"將查詢 {len(targets)} 個未標記的 BTC/TRX 地址，\n"
+                                    "是否繼續？",
+                                    parent=self):
+            return
+
+        def _run():
+            updated = 0
+            for r in targets:
+                label = get_label(r["address"], r["chain_institution"])
+                if label:
+                    data = dict(r)
+                    data["label"] = label
+                    _db.upsert_case_address(self.case_id, data)
+                    updated += 1
+            self.after(0, self._load)
+            self.after(0, lambda: messagebox.showinfo(
+                "批次查標籤完成",
+                f"查詢 {len(targets)} 筆，成功標記 {updated} 筆。",
+                parent=self))
+
+        threading.Thread(target=_run, daemon=True).start()
