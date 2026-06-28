@@ -228,6 +228,10 @@ def _migrate(con: sqlite3.Connection):
     existing_c = {r[1] for r in con.execute("PRAGMA table_info(cases)").fetchall()}
     if "transcript" not in existing_c:
         con.execute("ALTER TABLE cases ADD COLUMN transcript TEXT")
+    # graph_snapshots 加入佈局座標欄位
+    existing_gs = {r[1] for r in con.execute("PRAGMA table_info(graph_snapshots)").fetchall()}
+    if "pos_json" not in existing_gs:
+        con.execute("ALTER TABLE graph_snapshots ADD COLUMN pos_json TEXT DEFAULT '{}'")
     # case_id 欄位存在後才能建索引
     con.execute("CREATE INDEX IF NOT EXISTS idx_wallets_case ON wallets(case_id)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_lookups_case ON tx_lookups(case_id)")
@@ -937,15 +941,41 @@ def get_edges_for_graph(case_id: int = None, chain: str = None,
 # ── 幣流圖快照 CRUD ───────────────────────────────────────────────────────────
 
 def save_graph_snapshot(case_id: int, chain: str, nodes: list, edges: list,
-                        label: str = "") -> int:
+                        label: str = "",
+                        pos_network: dict = None,
+                        pos_maltego: dict = None) -> int:
+    """新增一筆幣流圖快照（含佈局座標）。"""
+    pos_data = {"network": pos_network or {}, "maltego": pos_maltego or {}}
     with _conn() as con:
         cur = con.execute("""
-            INSERT INTO graph_snapshots (case_id, chain, label, nodes_json, edges_json)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO graph_snapshots
+                (case_id, chain, label, nodes_json, edges_json, pos_json)
+            VALUES (?, ?, ?, ?, ?, ?)
         """, (case_id, chain, label,
               json.dumps(nodes, ensure_ascii=False),
-              json.dumps(edges, ensure_ascii=False)))
+              json.dumps(edges, ensure_ascii=False),
+              json.dumps(pos_data, ensure_ascii=False)))
         return cur.lastrowid
+
+
+def update_graph_snapshot(snapshot_id: int, nodes: list, edges: list,
+                           pos_network: dict = None, pos_maltego: dict = None,
+                           chain: str = None) -> None:
+    """覆蓋指定快照的節點、交易與佈局座標。"""
+    pos_data = {"network": pos_network or {}, "maltego": pos_maltego or {}}
+    sets = ("nodes_json=?, edges_json=?, pos_json=?, "
+            "saved_at=datetime('now','localtime')")
+    vals: list = [
+        json.dumps(nodes, ensure_ascii=False),
+        json.dumps(edges, ensure_ascii=False),
+        json.dumps(pos_data, ensure_ascii=False),
+    ]
+    if chain is not None:
+        sets += ", chain=?"
+        vals.append(chain)
+    vals.append(snapshot_id)
+    with _conn() as con:
+        con.execute(f"UPDATE graph_snapshots SET {sets} WHERE id=?", vals)
 
 
 def get_graph_snapshots(case_id: int) -> list[dict]:
@@ -959,6 +989,9 @@ def get_graph_snapshots(case_id: int) -> list[dict]:
         d = dict(r)
         d["nodes"] = json.loads(d.pop("nodes_json", "[]"))
         d["edges"] = json.loads(d.pop("edges_json", "[]"))
+        pos = json.loads(d.pop("pos_json", "{}"))
+        d["pos_network"] = pos.get("network", {})
+        d["pos_maltego"] = pos.get("maltego", {})
         result.append(d)
     return result
 

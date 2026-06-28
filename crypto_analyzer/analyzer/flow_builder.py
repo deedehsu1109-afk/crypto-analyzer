@@ -74,6 +74,10 @@ class NodeInfo:
     color:   str = "#AAAAAA"
     expanded: bool = False           # 是否已展開（查詢過它的交易）
     in_db:    bool = False           # 是否已存入 DB
+    # 涉案地址標記（來自 case_addresses）
+    holder_role: str = ""            # 被害人 / 嫌疑人 / 中間人
+    case_label:  str = ""            # 標記說明
+    case_notes:  str = ""            # 備註
 
     @property
     def display_label(self) -> str:
@@ -97,7 +101,7 @@ class EdgeInfo:
 
     @property
     def amount_display(self) -> str:
-        if self.tx_type in ("erc20", "trc20") and self.token_symbol:
+        if self.token_symbol:
             return f"{self.token_amount:,.4f} {self.token_symbol}"
         return f"{self.value_native:,.6f}"
 
@@ -293,6 +297,9 @@ class GraphState:
                 "color":         info.color,
                 "display_label": info.display_label,
                 "expanded":      info.expanded,
+                "holder_role":   info.holder_role,
+                "case_label":    info.case_label,
+                "case_notes":    info.case_notes,
             })
         for e in self.edges:
             key = (e.source, e.target)

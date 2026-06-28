@@ -126,6 +126,9 @@ class App(ctk.CTk):
             "_tx_tree":    {"col": "", "asc": True},
             "_token_tree": {"col": "", "asc": True},
         }
+        self._addr_highlight_iids: dict = {
+            "_tx_tree": {}, "_token_tree": {}
+        }
         self._build_ui()
 
     # ═══════════════════════════════════════════════════════════════════════════
@@ -804,8 +807,9 @@ class App(ctk.CTk):
         icon      = "🔵" if is_crypto else "🏦"
         chain     = addr.get("chain_institution", "")
         address   = addr.get("address", "")
-        role      = addr.get("holder_role") or "不明"
+        role      = addr.get("holder_role") or ""
         label     = addr.get("label") or ""
+        notes     = addr.get("notes") or ""
 
         masked = self._mask_address(address)
         role_color = {"被害人": "#66dd66", "嫌疑人": "#ff9944",
@@ -816,16 +820,40 @@ class App(ctk.CTk):
         item.grid_columnconfigure(0, weight=1)
 
         line1 = f"{icon} {chain}  {masked}"
-        line2 = f"  {label or role}"
 
         if is_crypto:
-            ctk.CTkButton(
+            btn = ctk.CTkButton(
                 item, text=line1,
                 font=("Consolas", 11), anchor="w", height=26,
                 fg_color="transparent", hover_color="#1a2540",
                 text_color="#c0d4f0",
                 command=lambda a=address, c=chain: self._sidebar_click_addr(a, c)
-            ).grid(row=0, column=0, sticky="ew")
+            )
+            btn.grid(row=0, column=0, sticky="ew")
+
+            # 右鍵選單（避免右鍵意外觸發左鍵 command）
+            _ctx = tk.Menu(item, tearoff=0, bg="#2b2b2b", fg="white",
+                           activebackground="#1f538d", activeforeground="white",
+                           font=("Microsoft JhengHei", 10))
+            _ctx.add_command(
+                label="複製地址",
+                command=lambda _a=address: (
+                    self.clipboard_clear(),
+                    self.clipboard_append(_a),
+                    self.status_var.set(f"已複製：{_a}")))
+            _ctx.add_command(
+                label="查詢此地址",
+                command=lambda _a=address, _c=chain: self._sidebar_click_addr(_a, _c))
+            _ctx.add_separator()
+            _ctx.add_command(
+                label="✎ 編輯涉案記錄",
+                command=lambda _r=addr: self._sidebar_edit_addr(_r))
+            _ctx.add_command(
+                label="✕ 從涉案清單移除",
+                command=lambda _r=addr: self._sidebar_remove_addr(_r))
+            btn.bind("<Button-3>", lambda e, m=_ctx: m.tk_popup(e.x_root, e.y_root))
+            btn.bind("<Enter>", lambda e, a=address: self._highlight_addr_in_trees(a))
+            btn.bind("<Leave>", lambda e: self._clear_highlight_in_trees())
         else:
             ctk.CTkLabel(
                 item, text=line1,
@@ -833,10 +861,13 @@ class App(ctk.CTk):
                 text_color="#888888"
             ).grid(row=0, column=0, sticky="ew", padx=4)
 
-        ctk.CTkLabel(item, text=line2,
-                     font=("Microsoft JhengHei", 10),
-                     text_color=role_color, anchor="w").grid(
-            row=1, column=0, sticky="ew", padx=10)
+        # 依序顯示：持有人角色、標記說明、備註（同一排，有資料才加入）
+        info_parts = [v for v in (role, label, notes) if v]
+        if info_parts:
+            ctk.CTkLabel(item, text="  " + "　".join(info_parts),
+                         font=("Microsoft JhengHei", 10),
+                         text_color=role_color, anchor="w").grid(
+                row=1, column=0, sticky="ew", padx=10)
 
     def _make_sidebar_hist_item(self, parent, wlt: dict):
         chain   = wlt.get("chain", "")
@@ -892,13 +923,38 @@ class App(ctk.CTk):
 
         threading.Thread(target=_load, daemon=True).start()
 
+    def _sidebar_edit_addr(self, addr: dict):
+        """從側邊欄右鍵選單開啟涉案地址編輯對話框"""
+        if not self._active_case:
+            messagebox.showwarning("未選擇案件", "請先選擇目前作業案件", parent=self)
+            return
+        def on_save():
+            self._refresh_sidebar()
+            if self._case_addr_panel:
+                self._case_addr_panel._load()
+        AddressDialog(self, self._active_case["id"], row=addr, on_save=on_save)
+
+    def _sidebar_remove_addr(self, addr: dict):
+        """從側邊欄右鍵選單移除涉案地址記錄"""
+        address = addr.get("address", "")
+        if not messagebox.askyesno(
+            "確認移除",
+            f"確定要從涉案清單移除此地址？\n\n{address}",
+            parent=self
+        ):
+            return
+        _db.delete_case_address(addr["id"])
+        self._refresh_sidebar()
+        if self._case_addr_panel:
+            self._case_addr_panel._load()
+
     # ── 地址側寫分頁 ──────────────────────────────────────────────────────────
 
     def _build_profile_tab(self, parent: ctk.CTkFrame):
         parent.grid_columnconfigure(0, weight=1)
-        parent.grid_rowconfigure(2, weight=0)  # 上方固定區域
-        parent.grid_rowconfigure(3, weight=0)  # 交易篩選列
-        parent.grid_rowconfigure(4, weight=1)  # 下方交易分頁（展開）
+        parent.grid_rowconfigure(1, weight=0)  # 上方固定區域
+        parent.grid_rowconfigure(2, weight=0)  # 交易篩選列
+        parent.grid_rowconfigure(3, weight=1)  # 下方交易分頁（展開）
 
         top = ctk.CTkFrame(parent, corner_radius=8)
         top.grid(row=0, column=0, sticky="ew", padx=4, pady=(4, 2))
@@ -964,11 +1020,16 @@ class App(ctk.CTk):
             command=self._add_to_flow_graph)
         self.flow_btn.grid(row=0, column=9, padx=(2, 8), pady=8)
 
-        # 查詢進度列（row=1）：進度條 + 步驟文字
+        # 時間篩選列（row=1，常駐顯示於工具列下方）
+        tf_row = ctk.CTkFrame(top, fg_color="#1a1a2e", corner_radius=4)
+        tf_row.grid(row=1, column=0, columnspan=10, sticky="ew", padx=4, pady=(0, 4))
+        self._build_time_bar(tf_row)
+
+        # 查詢進度列（row=2）：進度條 + 步驟文字
         self._query_progress_bar = ctk.CTkProgressBar(
             top, mode="indeterminate", height=6, corner_radius=0)
         self._query_progress_bar.grid(
-            row=1, column=0, columnspan=10, sticky="ew", padx=0, pady=0)
+            row=2, column=0, columnspan=10, sticky="ew", padx=0, pady=0)
         self._query_progress_bar.set(0)
         self._query_progress_bar.grid_remove()
 
@@ -976,24 +1037,12 @@ class App(ctk.CTk):
             top, text="", font=("Microsoft JhengHei", 10),
             text_color="#5fa8d3", anchor="w")
         self._query_step_lbl.grid(
-            row=2, column=0, columnspan=10, sticky="ew", padx=10, pady=(2, 4))
+            row=3, column=0, columnspan=10, sticky="ew", padx=10, pady=(2, 4))
         self._query_step_lbl.grid_remove()
-
-        # 時間篩選
-        tf_wrap = ctk.CTkFrame(parent, fg_color="transparent")
-        tf_wrap.grid(row=1, column=0, sticky="ew", padx=4, pady=(0, 2))
-        self._time_bar_visible = False
-        self._time_toggle_btn = ctk.CTkButton(
-            tf_wrap, text="⏱ 時間篩選 ▼", width=120,
-            font=("Microsoft JhengHei", 11), fg_color="#3a3a5a",
-            command=self._toggle_time_bar)
-        self._time_toggle_btn.pack(side="top", anchor="w")
-        self._time_bar = ctk.CTkFrame(tf_wrap, corner_radius=6, fg_color="#1e1e2e")
-        self._build_time_bar(self._time_bar)
 
         # ── 上方：摘要 ＋ 授權對象（按鈕折疊，預設隱藏） ──
         top_info = ctk.CTkFrame(parent, corner_radius=8)
-        top_info.grid(row=2, column=0, sticky="ew", padx=4, pady=(0, 2))
+        top_info.grid(row=1, column=0, sticky="ew", padx=4, pady=(0, 2))
         top_info.grid_columnconfigure(0, weight=1)
 
         # 按鈕列（常駐顯示）
@@ -1018,9 +1067,8 @@ class App(ctk.CTk):
         self._approval_btn.pack(side="left", padx=4)
 
         # 錢包摘要內容（預設隱藏，固定高度 230px）
-        self._summary_content = ctk.CTkFrame(top_info, fg_color="transparent", height=230)
+        self._summary_content = ctk.CTkFrame(top_info, fg_color="transparent")
         self._summary_content.grid(row=1, column=0, sticky="ew", padx=4, pady=(0, 4))
-        self._summary_content.grid_propagate(False)
         self._summary_content.grid_remove()
         self._build_summary_section(self._summary_content)
 
@@ -1040,7 +1088,7 @@ class App(ctk.CTk):
         self._search_t_to      = tk.StringVar()
 
         filter_bar = ctk.CTkFrame(parent, corner_radius=6, fg_color="#1a1a2e", height=72)
-        filter_bar.grid(row=3, column=0, sticky="ew", padx=4, pady=(0, 2))
+        filter_bar.grid(row=2, column=0, sticky="ew", padx=4, pady=(0, 2))
         filter_bar.grid_propagate(False)
         filter_bar.grid_columnconfigure(0, weight=1)
 
@@ -1092,7 +1140,7 @@ class App(ctk.CTk):
 
         # ── 下方交易分頁（展開） ──
         self._tx_tabs = ctk.CTkTabview(parent, corner_radius=8)
-        self._tx_tabs.grid(row=4, column=0, sticky="nsew", padx=4, pady=(0, 4))
+        self._tx_tabs.grid(row=3, column=0, sticky="nsew", padx=4, pady=(0, 4))
         self._tx_tabs.add("原始交易")
         self._tx_tabs.add("Token 轉帳")
         self._build_tx_section(self._tx_tabs.tab("原始交易"),   "_tx_tree")
@@ -1142,13 +1190,8 @@ class App(ctk.CTk):
         self._time_each.bind("<KeyRelease>",  self._on_time_change)
 
     def _toggle_time_bar(self):
-        self._time_bar_visible = not self._time_bar_visible
-        if self._time_bar_visible:
-            self._time_bar.pack(side="top", fill="x", pady=(4, 0))
-            self._time_toggle_btn.configure(text="⏱ 時間篩選 ▲")
-        else:
-            self._time_bar.pack_forget()
-            self._time_toggle_btn.configure(text="⏱ 時間篩選 ▼")
+        """時間篩選已常駐顯示；保留此方法相容既有呼叫，執行時 focus 起始時間欄位。"""
+        self._time_start.focus_set()
 
     def _toggle_summary(self):
         self._summary_visible = not self._summary_visible
@@ -1168,51 +1211,112 @@ class App(ctk.CTk):
 
     def _build_summary_section(self, parent: ctk.CTkFrame):
         parent.grid_columnconfigure(0, weight=1)
-        parent.grid_rowconfigure(1, weight=1)
 
-        ctk.CTkLabel(parent, text="錢包摘要",
+        f = ctk.CTkFrame(parent, corner_radius=0, fg_color="transparent")
+        f.grid(row=0, column=0, sticky="ew", padx=0, pady=(2, 4))
+        # 4-column: col0=key_L  col1=val_L  col2=key_R  col3=val_R
+        f.grid_columnconfigure(0, weight=0, minsize=88)
+        f.grid_columnconfigure(1, weight=1)
+        f.grid_columnconfigure(2, weight=0, minsize=88)
+        f.grid_columnconfigure(3, weight=1)
+
+        self._summary_labels: list[tuple] = []
+
+        def _k(text, sub=False, row=0, col=0, padx=(6, 2), pady=2, cspan=1):
+            ctk.CTkLabel(f, text=text + "：",
+                         font=("Microsoft JhengHei", 9 if sub else 10),
+                         text_color="gray50" if sub else "gray65",
+                         anchor="e").grid(
+                row=row, column=col, columnspan=cspan,
+                padx=padx, pady=pady, sticky="e")
+
+        def _v(row, col, wrap=180, mono=True, cspan=1, pady=2):
+            lbl = ctk.CTkLabel(f, text="—",
+                               font=("Consolas", 10) if mono
+                               else ("Microsoft JhengHei", 10),
+                               anchor="w", wraplength=wrap)
+            lbl.grid(row=row, column=col, columnspan=cspan,
+                     padx=(2, 6), pady=pady, sticky="ew")
+            self._bind_label_copy_menu(lbl)
+            return lbl
+
+        # Row 0: 區塊鏈 (val idx 0)
+        _k("區塊鏈", row=0, col=0)
+        v0 = _v(0, 1, wrap=120)
+
+        # Row 1: 錢包地址 (val idx 1) — full width
+        _k("錢包地址", row=1, col=0)
+        v1 = _v(1, 1, wrap=460, cspan=3)
+
+        # Row 2: 首次交易時間 (idx 2) | 最後交易時間 (idx 3)
+        _k("首次交易", row=2, col=0)
+        v2 = _v(2, 1, wrap=160)
+        _k("最後交易", row=2, col=2, padx=(10, 2))
+        v3 = _v(2, 3, wrap=160)
+
+        # Row 3: 首次資金來源 (idx 4) — full width
+        _k("首次資金來源", row=3, col=0)
+        v4 = _v(3, 1, wrap=460, cspan=3)
+
+        # Row 4: 欄位標題 header
+        ctk.CTkLabel(f, text="  發  起",
                      font=("Microsoft JhengHei", 10, "bold"),
-                     text_color="#aac4ff", anchor="w").grid(
-            row=0, column=0, padx=6, pady=(4, 2), sticky="w")
+                     text_color="#88aadd", fg_color="#1a2a3a",
+                     anchor="w", corner_radius=4).grid(
+            row=4, column=0, columnspan=2,
+            padx=(6, 2), pady=(5, 2), sticky="ew")
+        ctk.CTkLabel(f, text="  接  受",
+                     font=("Microsoft JhengHei", 10, "bold"),
+                     text_color="#88ddaa", fg_color="#1a3a2a",
+                     anchor="w", corner_radius=4).grid(
+            row=4, column=2, columnspan=2,
+            padx=(4, 6), pady=(5, 2), sticky="ew")
 
-        frame = ctk.CTkScrollableFrame(parent, corner_radius=0,
-                                       fg_color="transparent")
-        frame.grid(row=1, column=0, sticky="nsew", padx=0, pady=(0, 4))
-        frame.grid_columnconfigure(1, weight=1)
+        # Row 5: 次數合計 (idx 5) | (idx 10)
+        _k("次數（合計）", row=5, col=0)
+        v5 = _v(5, 1, wrap=80)
+        _k("次數（合計）", row=5, col=2, padx=(10, 2))
+        v10 = _v(5, 3, wrap=80)
 
-        self._summary_labels: list[tuple[ctk.CTkLabel, ctk.CTkLabel]] = []
-        fields = [
-            "區塊鏈", "錢包地址", "首次交易時間", "最後交易時間",
-            "首次資金來源",
-            "發起交易次數（合計）", "── ETH 發起次數", "── ERC-20 發起次數",
-            "發起交易總金額（ETH）", "ERC-20 發出（依 Token）",
-            "接受交易次數（合計）", "── ETH 接受次數", "── ERC-20 接受次數",
-            "接受交易總金額（ETH）", "ERC-20 收入（依 Token）",
-            "總手續費（ETH）", "最多手續費流向",
-        ]
-        for i, f in enumerate(fields):
-            is_sub = f.startswith("──")
-            lbl = ctk.CTkLabel(frame, text=f + "：",
-                               font=("Microsoft JhengHei",
-                                     10 if is_sub else 11,
-                                     "normal" if is_sub else "bold"),
-                               text_color=("gray60" if is_sub else None),
-                               anchor="e", width=170)
-            lbl.grid(row=i, column=0, padx=(6, 4),
-                     pady=2 if is_sub else 3, sticky="e")
-            val = ctk.CTkLabel(frame, text="—",
-                               font=("Consolas", 10 if is_sub else 11),
-                               anchor="w", wraplength=250)
-            val.grid(row=i, column=1, padx=(2, 6),
-                     pady=2 if is_sub else 3, sticky="w")
-            self._bind_label_copy_menu(val)
-            self._summary_labels.append((lbl, val))
+        # Row 6: ETH 次數 (idx 6) | (idx 11)
+        _k("── ETH", sub=True, row=6, col=0, pady=1)
+        v6 = _v(6, 1, wrap=80, pady=1)
+        _k("── ETH", sub=True, row=6, col=2, padx=(10, 2), pady=1)
+        v11 = _v(6, 3, wrap=80, pady=1)
+
+        # Row 7: Token 次數 (idx 7) | (idx 12)
+        _k("── Token", sub=True, row=7, col=0, pady=1)
+        v7 = _v(7, 1, wrap=80, pady=1)
+        _k("── Token", sub=True, row=7, col=2, padx=(10, 2), pady=1)
+        v12 = _v(7, 3, wrap=80, pady=1)
+
+        # Row 8: 總金額 (idx 8) | (idx 13)
+        _k("總金額", row=8, col=0)
+        v8 = _v(8, 1, wrap=160)
+        _k("總金額", row=8, col=2, padx=(10, 2))
+        v13 = _v(8, 3, wrap=160)
+
+        # Row 9: Token 明細 (idx 9) | (idx 14)
+        _k("Token 明細", row=9, col=0)
+        v9 = _v(9, 1, wrap=160, mono=False)
+        _k("Token 明細", row=9, col=2, padx=(10, 2))
+        v14 = _v(9, 3, wrap=160, mono=False)
+
+        # Row 10: 總手續費 (idx 15) | 費用流向 (idx 16)
+        _k("總手續費", row=10, col=0, pady=(4, 4))
+        v15 = _v(10, 1, wrap=160, pady=(4, 4))
+        _k("費用主要流向", row=10, col=2, padx=(10, 2), pady=(4, 4))
+        v16 = _v(10, 3, wrap=160, pady=(4, 4))
+
+        # _summary_labels 必須依照 values 清單索引順序 (0-16)
+        for v in (v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16):
+            self._summary_labels.append((None, v))
 
         self._tf_info_lbl = ctk.CTkLabel(
-            frame, text="", font=("Microsoft JhengHei", 10),
-            anchor="w", text_color="#ffcc55", wraplength=380)
-        self._tf_info_lbl.grid(row=len(fields), column=0, columnspan=2,
-                               padx=6, pady=(2, 6), sticky="w")
+            f, text="", font=("Microsoft JhengHei", 9),
+            anchor="w", text_color="#ffcc55", wraplength=480)
+        self._tf_info_lbl.grid(row=11, column=0, columnspan=4,
+                               padx=6, pady=(2, 4), sticky="w")
 
     def _build_approvals_section(self, parent: ctk.CTkFrame):
         parent.grid_columnconfigure(0, weight=1)
@@ -1594,6 +1698,7 @@ class App(ctk.CTk):
         hsb.grid(row=1, column=0, sticky="ew")
         parent.grid_columnconfigure(0, weight=1)
         parent.grid_rowconfigure(0, weight=1)
+        tree.tag_configure("addr_highlight", background="#1a3a5a", foreground="#aaddff")
         self._bind_tree_context_menu(tree, add_addr_menu=add_addr_menu)
         return tree
 
@@ -1610,6 +1715,55 @@ class App(ctk.CTk):
                          command=lambda: (inner.select_range(0, "end"),
                                           inner.icursor("end")))
         inner.bind("<Button-3>", lambda e: menu.tk_popup(e.x_root, e.y_root))
+
+    def _highlight_addr_in_trees(self, address: str):
+        """側邊欄地址 hover：在符合的發送方/接收方格位前加 ► 標記（僅格位，不影響整列）。"""
+        self._clear_highlight_in_trees()
+        if not address:
+            return
+        addr_lower = address.lower()
+        for attr in ("_tx_tree", "_token_tree"):
+            tree = getattr(self, attr, None)
+            if tree is None:
+                continue
+            cols = list(tree.cget("columns"))
+            addr_col_map: dict = {}
+            for c in ("發送方", "接收方"):
+                if c in cols:
+                    addr_col_map[c] = cols.index(c)
+            if not addr_col_map:
+                continue
+            saved: dict = {}  # {iid: {col_idx: original_str}}
+            for iid in tree.get_children():
+                vals = list(tree.item(iid, "values"))
+                cell_changes: dict = {}
+                for col_name, col_idx in addr_col_map.items():
+                    if col_idx < len(vals) and addr_lower in str(vals[col_idx]).lower():
+                        original = str(vals[col_idx])
+                        cell_changes[col_idx] = original
+                        vals[col_idx] = "► " + original
+                if cell_changes:
+                    tree.item(iid, values=vals)
+                    saved[iid] = cell_changes
+            self._addr_highlight_iids[attr] = saved
+
+    def _clear_highlight_in_trees(self):
+        """清除交易列表中格位的 ► 標記，還原原始值。"""
+        for attr in ("_tx_tree", "_token_tree"):
+            tree = getattr(self, attr, None)
+            if tree is None:
+                continue
+            saved = self._addr_highlight_iids.get(attr, {})
+            for iid, cell_changes in saved.items():
+                try:
+                    vals = list(tree.item(iid, "values"))
+                    for col_idx, original in cell_changes.items():
+                        if col_idx < len(vals):
+                            vals[col_idx] = original
+                    tree.item(iid, values=vals)
+                except Exception:
+                    pass
+            self._addr_highlight_iids[attr] = {}
 
     def _bind_tree_context_menu(self, tree: ttk.Treeview,
                                 add_addr_menu: bool = False):
@@ -2219,22 +2373,36 @@ class App(ctk.CTk):
                 remaining = (max_r - len(txs)) if max_r is not None else None
                 self._set_query_step("正在抓取 TRC-20 轉帳...")
                 if is_center:
-                    # 置中模式 TRC-20：與 TRX 相同的漸進窗口策略（以 center_ts 為中心 ±window）
-                    # 確保窗口內 TRC-20 可全量取回，排序後由 filter_centered 選出軸心附近的記錄
-                    _trc20_best: list = []
+                    # 置中模式 TRC-20：分側策略（與 TRX 原生交易相同）
+                    # 軸心前：TronScan 預設降序，limit=each 即可取最近 each 筆
+                    try:
+                        _trc20_before = api.get_trc20_transfers(
+                            address, end_ts=center_ts, limit=each)
+                    except Exception:
+                        _trc20_before = []
+                    # 軸心後：漸進擴大窗口，取最舊 each 筆（排序後截取）
+                    self._set_query_step("正在搜尋 TRC-20 軸心後轉帳...")
+                    _trc20_after: list = []
+                    _trc20_best_a: list = []
                     for _wt in [3600, 21600, 86400, 259200, 604800]:
                         try:
-                            raw_trc = api.get_trc20_transfers(
-                                address,
-                                start_ts=center_ts - _wt, end_ts=center_ts + _wt,
+                            _chunk = api.get_trc20_transfers(
+                                address, start_ts=center_ts, end_ts=center_ts + _wt,
                                 limit=99999, max_records=10001)
-                            _trc20_best = raw_trc
-                            if len(raw_trc) >= each:
-                                break  # 已取得足夠筆數，停止擴大
-                            # 不足 each 筆，嘗試更大窗口
+                            _trc20_best_a = _chunk
+                            if len(_chunk) >= each:
+                                _chunk.sort(key=lambda t: get_tx_ts(t, "TRX"))
+                                _trc20_after = _chunk[:each]
+                                break
                         except TooManyRecordsError:
-                            break  # 飽和，沿用上一個窗口的最佳結果
-                    trc20 = _trc20_best
+                            if _trc20_best_a:
+                                _trc20_best_a.sort(key=lambda t: get_tx_ts(t, "TRX"))
+                                _trc20_after = _trc20_best_a[:each]
+                            break
+                    if not _trc20_after and _trc20_best_a:
+                        _trc20_best_a.sort(key=lambda t: get_tx_ts(t, "TRX"))
+                        _trc20_after = _trc20_best_a[:each]
+                    trc20 = _trc20_before + _trc20_after
                 else:
                     trc20_start, trc20_end = s_ts, e_ts
                     if trc20_start is None and tf:
@@ -2305,7 +2473,10 @@ class App(ctk.CTk):
                 def ask():
                     q.put(messagebox.askyesno("交易筆數超過上限", warn))
                 self.after(0, ask)
-                ans = q.get(timeout=60)
+                try:
+                    ans = q.get(timeout=300)
+                except Exception:
+                    ans = False
                 if not ans:
                     filtered_raw = filtered_raw[:MAX_TOTAL]
                     filtered_erc = []
@@ -2328,7 +2499,10 @@ class App(ctk.CTk):
                 def ask_sug():
                     q.put(messagebox.askyesno("建議增加筆數", sug))
                 self.after(0, ask_sug)
-                ans = q.get(timeout=60)
+                try:
+                    ans = q.get(timeout=300)
+                except Exception:
+                    ans = False
                 if ans:
                     new_each = min(
                         max(res["total_available_before"],
@@ -2449,8 +2623,7 @@ class App(ctk.CTk):
         def _use_filter():
             dlg.destroy()
             self._show_case_data_tab("🔍  地址側寫")
-            if not self._time_bar_visible:
-                self._toggle_time_bar()
+            self._toggle_time_bar()
 
         def _continue_all():
             dlg.destroy()
@@ -3143,8 +3316,6 @@ class App(ctk.CTk):
                                           text_color="#ff7070")
 
     def _get_time_filter(self) -> dict | None:
-        if not self._time_bar_visible:
-            return None
         s_str = self._time_start.get().strip()
         e_str = self._time_end.get().strip()
         if not s_str:

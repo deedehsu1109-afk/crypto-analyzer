@@ -1,4 +1,5 @@
 from __future__ import annotations
+import json
 import threading
 import tkinter as tk
 from tkinter import messagebox, simpledialog, filedialog
@@ -9,6 +10,7 @@ import matplotlib
 matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
+import matplotlib.transforms as mtransforms
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 import networkx as nx
 
@@ -57,8 +59,15 @@ class FlowGraphPanel(ctk.CTkFrame):
         self._fig: plt.Figure | None = None
         self._ax:  plt.Axes   | None = None
         self._mpl_canvas: FigureCanvasTkAgg | None = None
-        self._pos: dict = {}        # networkx 佈局快取
-        self._selected_node: str | None = None
+        self._pos_network: dict = {}   # 地址關係圖佈局快取（spring layout）
+        self._pos_maltego: dict = {}   # 司法金流圖佈局快取（BFS 階層）
+        self._selected_node:  str | None = None
+        # 拖曳 / 複選狀態
+        self._selected_nodes: set       = set()
+        self._drag_node:      str | None = None
+        self._drag_press_xy:  tuple | None = None  # 拖曳起點（資料座標）
+        self._drag_start_pos: dict       = {}       # 拖曳起點時 _pos 的快照
+        self._is_dragging:    bool       = False
 
         self._build_ui()
 
@@ -79,21 +88,52 @@ class FlowGraphPanel(ctk.CTkFrame):
         self._state.add_edges_from_profile(profile)
         self._gen_mode.set("explore")
         self._update_mode_label()
+        self._pos_network = {}
+        self._pos_maltego = {}
         self._render()
 
-    def load_from_case(self, case_id: int, chain: str = "ETH"):
-        """案件模式：從 DB 載入整個案件的交易圖。"""
+    def load_from_case(self, case_id: int, chain: str = None):
+        """案件模式：優先從已儲存的幣流圖快照還原；若無快照則從交易記錄重建。"""
         from database import db as _db
-        self._state = GraphState(chain=chain, mode="evidence")
-        rows = _db.get_edges_for_graph(case_id=case_id, chain=chain)
-        self._state.add_edges_from_db_rows(rows)
-        # 把案件錢包標為已展開
-        wallets = _db.get_case_wallets(case_id)
-        for w in wallets:
-            addr = w.get("address", "")
+        self._current_case_id = case_id
+
+        snaps = _db.get_graph_snapshots(case_id)
+        if snaps:
+            # ── 有快照：還原節點、交易邊、佈局座標 ──────────────────────────
+            snap = snaps[0]   # 最新一筆（ORDER BY saved_at DESC）
+            self._state = GraphState.from_snapshot(
+                snap["nodes"], snap["edges"],
+                chain=snap.get("chain", chain or "ETH"), mode="evidence",
+            )
+            self._pos_network = {k: tuple(v)
+                                 for k, v in snap.get("pos_network", {}).items()}
+            self._pos_maltego = {k: tuple(v)
+                                 for k, v in snap.get("pos_maltego", {}).items()}
+        else:
+            # ── 無快照：從交易記錄重建（不限鏈別，chain=None 全部取出）────────
+            rows = _db.get_edges_for_graph(case_id=case_id, chain=chain)
+            detected = ({r.get("chain") for r in rows} - {None, ""}) or {"ETH"}
+            use_chain = detected.pop() if len(detected) == 1 else (chain or "ETH")
+            self._state = GraphState(chain=use_chain, mode="evidence")
+            self._state.add_edges_from_db_rows(rows)
+            wallets = _db.get_case_wallets(case_id)
+            for w in wallets:
+                addr = w.get("address", "")
+                if addr and addr in self._state.nodes:
+                    self._state.nodes[addr].expanded = True
+                    self._state.nodes[addr].custom_label = w.get("label", "")
+            self._pos_network = {}
+            self._pos_maltego = {}
+
+        # ── 涉案地址標記（每次都從 DB 取最新值，不依賴快照內容）────────────
+        for ca in _db.get_case_addresses(case_id):
+            addr = ca.get("address", "")
             if addr and addr in self._state.nodes:
-                self._state.nodes[addr].expanded = True
-                self._state.nodes[addr].custom_label = w.get("label", "")
+                n = self._state.nodes[addr]
+                n.holder_role = ca.get("holder_role") or ""
+                n.case_label  = ca.get("label")       or ""
+                n.case_notes  = ca.get("notes")        or ""
+
         self._gen_mode.set("evidence")
         self._update_mode_label()
         self._render()
@@ -107,7 +147,6 @@ class FlowGraphPanel(ctk.CTkFrame):
         self._state.add_edges_from_profile(profile)
         if addr and addr in self._state.nodes:
             self._state.nodes[addr].expanded = True
-        self._pos = {}   # 清除佈局快取，觸發重新計算
         self._render()
 
     def add_address_node(self, address: str, chain: str, label: str = ""):
@@ -121,7 +160,6 @@ class FlowGraphPanel(ctk.CTkFrame):
         node = self._state.add_node(address)
         if label:
             node.custom_label = label
-        self._pos = {}
         self._render()
 
     def add_hash_edge(self, result: dict):
@@ -224,7 +262,6 @@ class FlowGraphPanel(ctk.CTkFrame):
 
         if rows:
             self._state.add_edges_from_db_rows(rows)
-        self._pos = {}
         self._render()
 
     def add_row_edge(self, from_addr: str, to_addr: str, tx_hash: str,
@@ -248,13 +285,18 @@ class FlowGraphPanel(ctk.CTkFrame):
             "tx_hash":      tx_hash,
             "tx_type":      tx_type,
         }])
-        self._pos = {}
         self._render()
 
     def clear(self):
         self._state = None
-        self._pos   = {}
-        self._selected_node = None
+        self._pos_network = {}
+        self._pos_maltego = {}
+        self._selected_node  = None
+        self._selected_nodes = set()
+        self._drag_node      = None
+        self._drag_press_xy  = None
+        self._drag_start_pos = {}
+        self._is_dragging    = False
         if self._ax:
             self._ax.clear()
             self._ax.set_facecolor(BG_DARK)
@@ -318,7 +360,7 @@ class FlowGraphPanel(ctk.CTkFrame):
                       fg_color="#5a3a6a",
                       command=self._label_node_dialog).grid(row=0, column=6, padx=4, pady=8)
 
-        ctk.CTkButton(bar, text="儲存快照", width=80,
+        ctk.CTkButton(bar, text="更新案件圖", width=88,
                       font=("Microsoft JhengHei", 11),
                       fg_color="#6a4a2a",
                       command=self._save_snapshot).grid(row=0, column=7, padx=4, pady=8)
@@ -349,7 +391,17 @@ class FlowGraphPanel(ctk.CTkFrame):
         ctk.CTkButton(bar, text="↑ CSV", width=65,
                       font=("Microsoft JhengHei", 11),
                       fg_color="#1e3a2a",
-                      command=self._import_csv_dialog).grid(row=0, column=13, padx=(2, 12), pady=8)
+                      command=self._import_csv_dialog).grid(row=0, column=13, padx=2, pady=8)
+
+        ctk.CTkButton(bar, text="💾 存檔", width=72,
+                      font=("Microsoft JhengHei", 11),
+                      fg_color="#2a3a1e",
+                      command=self._save_graph_json).grid(row=0, column=14, padx=2, pady=8)
+
+        ctk.CTkButton(bar, text="📂 讀檔", width=72,
+                      font=("Microsoft JhengHei", 11),
+                      fg_color="#1e2a3a",
+                      command=self._load_graph_json).grid(row=0, column=15, padx=(2, 12), pady=8)
 
     def _build_canvas_area(self):
         frame = ctk.CTkFrame(self, fg_color=BG_DARK, corner_radius=0)
@@ -365,20 +417,38 @@ class FlowGraphPanel(ctk.CTkFrame):
         self._mpl_canvas = FigureCanvasTkAgg(self._fig, master=frame)
         self._mpl_canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
 
-        # matplotlib 工具列（縮放/平移）
-        toolbar_frame = tk.Frame(frame, bg=BG_DARK)
-        toolbar_frame.grid(row=1, column=0, sticky="ew")
-        toolbar = NavigationToolbar2Tk(self._mpl_canvas, toolbar_frame)
-        toolbar.config(background=BG_DARK)
-        for child in toolbar.winfo_children():
-            try:
-                child.config(background=BG_DARK, foreground=TEXT_COL)
-            except Exception:
-                pass
-        toolbar.update()
+        # 隱藏式 NavigationToolbar2Tk — 不顯示，僅保留 pan/zoom/home 等功能
+        _nav_host = tk.Frame(frame, height=0, bg=BG_DARK)
+        self._nav_toolbar = NavigationToolbar2Tk(self._mpl_canvas, _nav_host)
+        self._nav_toolbar.update()
+        # _nav_host 不加入 grid，故工具列不顯示
 
-        # 點擊事件
-        self._mpl_canvas.mpl_connect("button_press_event", self._on_canvas_click)
+        # 自訂中文工具列
+        nav_bar = ctk.CTkFrame(frame, fg_color="#16213e", corner_radius=4)
+        nav_bar.grid(row=1, column=0, sticky="w", padx=6, pady=(2, 4))
+
+        def _nav(method: str):
+            return lambda: getattr(self._nav_toolbar, method)()
+
+        _NAV_BTNS = [
+            ("⌂  還原視圖", "#1e3a5f", "#2a5a8a", _nav("home")),
+            ("←  退回",    "#1e2e1e", "#2e4a2e", _nav("back")),
+            ("前進  →",    "#1e2e1e", "#2e4a2e", _nav("forward")),
+            ("✥  平移移動", "#2a1e4a", "#4a2e7a", _nav("pan")),
+            ("⊕  框選縮放", "#1a3a2a", "#2a5a3a", _nav("zoom")),
+            ("💾  儲存圖片", "#4a1e1e", "#7a2e2e", _nav("save_figure")),
+        ]
+        for text, fg, hov, cmd in _NAV_BTNS:
+            ctk.CTkButton(nav_bar, text=text, width=90, height=28,
+                          font=("Microsoft JhengHei", 10, "bold"),
+                          fg_color=fg, hover_color=hov,
+                          command=cmd).pack(side="left", padx=3, pady=4)
+
+        # 點擊、拖曳、滾輪事件
+        self._mpl_canvas.mpl_connect("button_press_event",   self._on_canvas_click)
+        self._mpl_canvas.mpl_connect("button_release_event", self._on_mouse_release)
+        self._mpl_canvas.mpl_connect("motion_notify_event",  self._on_mouse_motion)
+        self._mpl_canvas.mpl_connect("scroll_event",         self._on_scroll)
 
         self.clear()
 
@@ -401,10 +471,12 @@ class FlowGraphPanel(ctk.CTkFrame):
 
     # ── 渲染 ──────────────────────────────────────────────────────────────────
 
-    def _render(self):
+    def _render(self, preserve_view: bool = False):
         if self._state is None or not self._state.nodes:
             self.clear()
             return
+        xlim = self._ax.get_xlim() if preserve_view else None
+        ylim = self._ax.get_ylim() if preserve_view else None
         self._state.rebuild_graph()
         mode = self._view_mode.get()
         self._ax.clear()
@@ -421,6 +493,9 @@ class FlowGraphPanel(ctk.CTkFrame):
             self._draw_timeline()
 
         self._fig.tight_layout(pad=0.5)
+        if preserve_view and xlim is not None:
+            self._ax.set_xlim(xlim)
+            self._ax.set_ylim(ylim)
         self._mpl_canvas.draw()
         self._update_stats()
 
@@ -430,8 +505,23 @@ class FlowGraphPanel(ctk.CTkFrame):
         if not G.nodes:
             return
 
-        if not self._pos or set(self._pos) != set(G.nodes):
-            self._pos = nx.spring_layout(G, k=2.5, iterations=50, seed=42)
+        g_nodes = set(G.nodes)
+        if not self._pos_network:
+            self._pos_network = nx.spring_layout(G, k=2.5, iterations=50, seed=42)
+        else:
+            new_nodes = g_nodes - set(self._pos_network)
+            if new_nodes:
+                # 有新增節點：固定現有節點座標，只計算新節點位置
+                fixed_pos = {n: self._pos_network[n] for n in set(self._pos_network) & g_nodes}
+                full_pos  = nx.spring_layout(
+                    G, k=2.5, iterations=50, seed=42,
+                    pos=fixed_pos,
+                    fixed=list(fixed_pos.keys()) or None,
+                )
+                self._pos_network = full_pos
+            # 清理已移除節點的座標快取
+            for n in set(self._pos_network) - g_nodes:
+                del self._pos_network[n]
 
         colors  = [G.nodes[n].get("color", "#AAAAAA") for n in G.nodes]
         labels  = {n: G.nodes[n].get("display_label", n[:8]) for n in G.nodes}
@@ -441,31 +531,152 @@ class FlowGraphPanel(ctk.CTkFrame):
         for u, v, d in G.edges(data=True):
             edge_widths.append(max(0.5, min(4.0, d.get("tx_count", 1) * 0.4)))
 
-        nx.draw_networkx_nodes(G, self._pos, ax=self._ax,
+        # 複選高亮：先畫較大的白色圓環（當作外框）
+        sel_in_g = [n for n in self._selected_nodes if n in G.nodes]
+        if sel_in_g:
+            nx.draw_networkx_nodes(G, self._pos_network, nodelist=sel_in_g,
+                                   ax=self._ax, node_color="#ffffff",
+                                   node_size=900, alpha=0.9)
+
+        nx.draw_networkx_nodes(G, self._pos_network, ax=self._ax,
                                node_color=colors, node_size=600, alpha=0.92)
-        nx.draw_networkx_labels(G, self._pos, labels=labels, ax=self._ax,
+        nx.draw_networkx_labels(G, self._pos_network, labels=labels, ax=self._ax,
                                 font_size=7, font_color=TEXT_COL,
                                 font_family="Microsoft JhengHei")
-        nx.draw_networkx_edges(G, self._pos, ax=self._ax,
+
+        # 涉案標記次標籤：持有人角色 / 標記說明 / 備註 — 垂直置中疊排，固定像素間距
+        if self._state:
+            _CHIPS = [
+                ("holder_role", "#ffcc55", lambda v: not v or v in ("不明", "unknown")),
+                ("case_label",  "#88ccff", lambda v: not v),
+                ("case_notes",  "#aaaaaa", lambda v: not v),
+            ]
+            _FIRST_PTS = 18   # 節點中心到第一行頂部（points，固定，不隨縮放變化）
+            _LINE_PTS  = 13   # 每行之間的固定間距（points）
+
+            for n in G.nodes:
+                ni = self._state.nodes.get(n)
+                if not ni or n not in self._pos_network:
+                    continue
+
+                chips = []
+                for attr, color, skip in _CHIPS:
+                    val = getattr(ni, attr, "")
+                    if not skip(val):
+                        chips.append((val, color))
+
+                if not chips:
+                    continue
+
+                nx_, ny_ = self._pos_network[n]
+
+                for i, (text, color) in enumerate(chips):
+                    # offset_copy：以資料座標 (nx_, ny_) 為錨點，向下平移固定 points
+                    trans = mtransforms.offset_copy(
+                        self._ax.transData, fig=self._fig,
+                        x=0, y=-(_FIRST_PTS + i * _LINE_PTS),
+                        units="points",
+                    )
+                    self._ax.text(
+                        nx_, ny_, text,
+                        transform=trans,
+                        fontsize=6, color=color,
+                        ha="center", va="top",
+                        fontfamily="Microsoft JhengHei",
+                        bbox=dict(
+                            facecolor="#0d0d1a",
+                            edgecolor=color,
+                            linewidth=0.5,
+                            alpha=0.90,
+                            pad=2.0,
+                            boxstyle="round,pad=0.25",
+                        ),
+                        clip_on=True,
+                        zorder=4,
+                    )
+
+        nx.draw_networkx_edges(G, self._pos_network, ax=self._ax,
                                edge_color="#4a6fa5", arrows=True,
                                arrowsize=15, width=edge_widths,
                                connectionstyle="arc3,rad=0.1",
                                min_source_margin=18, min_target_margin=18)
 
-        # 邊標籤（金額或筆數）
-        edge_labels = {}
-        for u, v, d in G.edges(data=True):
-            cnt = d.get("tx_count", 1)
-            sym = d.get("token_symbol", "")
-            w   = d.get("weight", 0)
-            if sym:
-                edge_labels[(u, v)] = f"{w:,.2f} {sym}" if cnt == 1 else f"{cnt}筆"
-            else:
-                edge_labels[(u, v)] = f"{w:,.4f}" if cnt == 1 else f"{cnt}筆"
-        nx.draw_networkx_edge_labels(
-            G, self._pos, edge_labels=edge_labels, ax=self._ax,
-            font_size=6, font_color="#aaaaaa",
-            bbox=dict(facecolor=BG_DARK, edgecolor="none", alpha=0.7))
+        # 邊標籤：每筆交易固定2行（時間＋數量＋幣種 / tx hash），固定像素間距
+        _EL_H   = 11   # 每行高度（points，不隨縮放改變）
+        _EL_MAX = 5    # 每條邊最多顯示幾筆，超過則補截斷說明
+
+        # 按 (source, target) 分組 _state.edges
+        _edge_grp: dict[tuple, list] = {}
+        for _ei in self._state.edges:
+            _k = (_ei.source, _ei.target)
+            if _k not in _edge_grp:
+                _edge_grp[_k] = []
+            _edge_grp[_k].append(_ei)
+
+        for (_eu, _ev), _txs in _edge_grp.items():
+            if _eu not in self._pos_network or _ev not in self._pos_network:
+                continue
+            # 邊中點（幾何中點，與 arc3 曲線足夠接近）
+            _mx = (self._pos_network[_eu][0] + self._pos_network[_ev][0]) / 2
+            _my = (self._pos_network[_eu][1] + self._pos_network[_ev][1]) / 2
+
+            _show  = _txs[:_EL_MAX]
+            _extra = len(_txs) - len(_show)
+
+            # 總行數：每筆 2 行，截斷提示再 +1
+            _n_lines = len(_show) * 2 + (1 if _extra else 0)
+
+            # 最上行 y offset，使整個標籤塊垂直置中於邊中點
+            _y0  = (_n_lines - 1) * _EL_H / 2.0
+            _row = 0
+
+            for _tx in _show:
+                # 行 1：時間  數量 幣種
+                _ts    = (_tx.tx_time or "").strip()
+                _line1 = f"{_ts}  {_tx.amount_display}" if _ts else _tx.amount_display
+
+                _tr1 = mtransforms.offset_copy(
+                    self._ax.transData, fig=self._fig,
+                    x=0, y=_y0 - _row * _EL_H, units="points")
+                self._ax.text(
+                    _mx, _my, _line1,
+                    transform=_tr1, fontsize=6, color="#cccccc",
+                    ha="center", va="center",
+                    fontfamily="Microsoft JhengHei",
+                    bbox=dict(facecolor="#0d0d1a", edgecolor="#4a6fa5",
+                              linewidth=0.4, alpha=0.88, pad=1.5,
+                              boxstyle="round,pad=0.2"),
+                    clip_on=True, zorder=3)
+                _row += 1
+
+                # 行 2：完整 tx hash
+                _tr2 = mtransforms.offset_copy(
+                    self._ax.transData, fig=self._fig,
+                    x=0, y=_y0 - _row * _EL_H, units="points")
+                self._ax.text(
+                    _mx, _my, _tx.tx_hash or "—",
+                    transform=_tr2, fontsize=5, color="#7a9cc0",
+                    ha="center", va="center",
+                    fontfamily="Consolas",
+                    bbox=dict(facecolor="#0d0d1a", edgecolor="none",
+                              alpha=0.82, pad=1.0,
+                              boxstyle="square,pad=0.15"),
+                    clip_on=True, zorder=3)
+                _row += 1
+
+            if _extra:
+                _trx = mtransforms.offset_copy(
+                    self._ax.transData, fig=self._fig,
+                    x=0, y=_y0 - _row * _EL_H, units="points")
+                self._ax.text(
+                    _mx, _my, f"…另 {_extra} 筆",
+                    transform=_trx, fontsize=5, color="#888888",
+                    ha="center", va="center",
+                    fontfamily="Microsoft JhengHei",
+                    bbox=dict(facecolor="#0d0d1a", edgecolor="none",
+                              alpha=0.80, pad=1.0,
+                              boxstyle="square,pad=0.15"),
+                    clip_on=True, zorder=3)
 
         self._draw_legend()
 
@@ -651,27 +862,148 @@ class FlowGraphPanel(ctk.CTkFrame):
 
     # ── 事件處理 ──────────────────────────────────────────────────────────────
 
+    def _on_scroll(self, event):
+        """滾輪縮放：以游標位置為中心放大／縮小。"""
+        if event.inaxes != self._ax or event.xdata is None:
+            return
+        cx, cy = event.xdata, event.ydata
+        # 每一格滾輪縮放 15%；step > 0 為向上（放大），< 0 為向下（縮小）
+        factor = 0.85 ** event.step
+        xl = self._ax.get_xlim()
+        yl = self._ax.get_ylim()
+        self._ax.set_xlim([cx - (cx - xl[0]) * factor,
+                           cx + (xl[1] - cx) * factor])
+        self._ax.set_ylim([cy - (cy - yl[0]) * factor,
+                           cy + (yl[1] - cy) * factor])
+        self._mpl_canvas.draw_idle()
+
+    # ── 節點找尋 ─────────────────────────────────────────────────────────────
+
+    def _find_nearest_node(self, x, y):
+        """回傳 (最近節點, 距離平方)；無節點時回傳 (None, inf)。"""
+        if x is None or y is None or not self._pos_network:
+            return None, float("inf")
+        best, best_d = None, float("inf")
+        for node, (nx_, ny_) in self._pos_network.items():
+            d = (nx_ - x) ** 2 + (ny_ - y) ** 2
+            if d < best_d:
+                best_d = d
+                best = node
+        return best, best_d
+
+    # ── 滑鼠事件 ─────────────────────────────────────────────────────────────
+
+    def _node_click_thresh(self) -> float:
+        """動態命中閾值（距離平方）：約等於視圖短邊的 4% 作為節點半徑。"""
+        xl = self._ax.get_xlim()
+        yl = self._ax.get_ylim()
+        r = 0.04 * min(xl[1] - xl[0], yl[1] - yl[0])
+        return r * r
+
     def _on_canvas_click(self, event):
-        if event.inaxes != self._ax:
+        if event.inaxes != self._ax or self._view_mode.get() != VIEW_NETWORK:
             return
-        if self._view_mode.get() != VIEW_NETWORK:
-            return
-        if not self._pos or self._state is None:
+        if not self._pos_network or self._state is None:
             return
 
-        # 找最近節點
-        ex, ey = event.xdata, event.ydata
-        min_dist = float("inf")
-        nearest  = None
-        for node, (nx_, ny_) in self._pos.items():
-            dist = (nx_ - ex) ** 2 + (ny_ - ey) ** 2
-            if dist < min_dist:
-                min_dist = dist
-                nearest  = node
+        nearest, dist = self._find_nearest_node(event.xdata, event.ydata)
+        on_node = nearest is not None and dist < self._node_click_thresh()
 
-        CLICK_THRESHOLD = 0.05
-        if nearest and min_dist < CLICK_THRESHOLD:
-            self._on_node_selected(nearest, event.dblclick)
+        # 右鍵：選單
+        if event.button == 3:
+            if on_node:
+                self._show_node_menu(nearest)
+            return
+
+        if event.button != 1:
+            return
+
+        # 左鍵雙擊：選單
+        if event.dblclick and on_node:
+            self._show_node_menu(nearest)
+            return
+
+        shift = "shift" in (event.key or "")
+
+        if on_node:
+            if shift:
+                # Shift 複選：切換
+                if nearest in self._selected_nodes:
+                    self._selected_nodes.discard(nearest)
+                else:
+                    self._selected_nodes.add(nearest)
+            else:
+                # 若點擊已選節點，保留現有複選（方便群組拖曳）
+                if nearest not in self._selected_nodes:
+                    self._selected_nodes = {nearest}
+
+            self._on_node_selected(nearest, dblclick=False)
+
+            # 準備拖曳
+            self._drag_node      = nearest
+            self._drag_press_xy  = (event.xdata, event.ydata)
+            self._drag_start_pos = {k: (v[0], v[1]) for k, v in self._pos_network.items()}
+            self._is_dragging    = False
+            self._draw_network_fast()   # 立即顯示選取高亮
+        else:
+            # 點擊空白區域：取消選取
+            if not shift:
+                self._selected_nodes.clear()
+                self._selected_node = None
+                self._sel_lbl.configure(text="")
+            self._drag_node     = None
+            self._drag_press_xy = None
+            self._draw_network_fast()
+
+    def _on_mouse_motion(self, event):
+        """拖曳移動：更新節點座標並快速重繪。"""
+        if (self._drag_node is None or event.inaxes != self._ax
+                or event.xdata is None or event.ydata is None):
+            return
+
+        dx = event.xdata - self._drag_press_xy[0]
+        dy = event.ydata - self._drag_press_xy[1]
+
+        # 超過最小移動量才啟動拖曳（避免誤觸）
+        if not self._is_dragging and dx * dx + dy * dy < 1e-6:
+            return
+        self._is_dragging = True
+
+        # 拖曳已選節點群組（若拖曳節點不在選取集合內，僅移動該節點）
+        to_move = (self._selected_nodes
+                   if self._drag_node in self._selected_nodes
+                   else {self._drag_node})
+
+        for n in to_move:
+            if n in self._drag_start_pos:
+                ox, oy = self._drag_start_pos[n]
+                self._pos_network[n] = (ox + dx, oy + dy)
+
+        self._draw_network_fast()
+
+    def _on_mouse_release(self, event):
+        """任意按鍵放開：清除拖曳狀態；左鍵拖曳結束時完整重繪並保留視圖。"""
+        was_left_drag = (event.button == 1 and self._is_dragging)
+        self._drag_node      = None
+        self._drag_press_xy  = None
+        self._drag_start_pos = {}
+        self._is_dragging    = False
+        if was_left_drag:
+            self._render(preserve_view=True)
+
+    def _draw_network_fast(self):
+        """拖曳時的輕量重繪：保留視圖範圍，不呼叫 tight_layout。"""
+        if self._state is None:
+            return
+        xlim = self._ax.get_xlim()
+        ylim = self._ax.get_ylim()
+        self._ax.clear()
+        self._ax.set_facecolor(BG_DARK)
+        self._ax.axis("off")
+        self._draw_network()
+        self._ax.set_xlim(xlim)
+        self._ax.set_ylim(ylim)
+        self._mpl_canvas.draw_idle()
 
     def _on_node_selected(self, address: str, dblclick: bool):
         self._selected_node = address
@@ -713,18 +1045,63 @@ class FlowGraphPanel(ctk.CTkFrame):
                 command=lambda r=role: self._set_node_role(address, r))
         menu.add_cascade(label="🏷 標記角色", menu=role_menu)
 
-        menu.add_command(label="✏ 自訂標籤",
-                         command=lambda: self._label_node_dialog(address))
+        from database import db as _db
+        _case_id = getattr(self, "_current_case_id", None)
+        if _case_id:
+            _ca_list = _db.get_case_addresses(_case_id)
+            _ca_row  = next(
+                (r for r in _ca_list
+                 if r.get("address", "").lower() == address.lower()),
+                None,
+            )
+        else:
+            _ca_row = None
+        if _ca_row:
+            menu.add_command(
+                label="📝 編輯涉案紀錄",
+                command=lambda r=_ca_row: self._open_case_address_dialog(address, r))
+        else:
+            menu.add_command(
+                label="➕ 加入涉案錢包",
+                command=lambda: self._open_case_address_dialog(address, None))
         menu.add_separator()
         menu.add_command(label="📋 複製地址",
                          command=lambda: self._copy_to_clipboard(address))
 
         try:
-            x = self.winfo_rootx() + self._mpl_canvas.get_tk_widget().winfo_x()
-            y = self.winfo_rooty() + self._mpl_canvas.get_tk_widget().winfo_y()
-            menu.tk_popup(x + 200, y + 200)
+            px, py = self.winfo_pointerxy()
+            menu.tk_popup(px, py)
         finally:
             menu.grab_release()
+
+    def _open_case_address_dialog(self, address: str, row: dict | None):
+        """開啟涉案地址對話框（編輯或新增），儲存後同步更新圖上的節點標記。"""
+        from database import db as _db
+        from gui.case_address_panel import AddressDialog
+        case_id = getattr(self, "_current_case_id", None)
+        if not case_id:
+            messagebox.showwarning("未開啟案件", "請先在案件分頁中開啟案件後再操作。", parent=self)
+            return
+        chain = self._state.chain if self._state else "ETH"
+
+        def _on_save():
+            updated = _db.get_case_addresses(case_id)
+            for ca in updated:
+                if ca.get("address", "").lower() == address.lower():
+                    if self._state and address in self._state.nodes:
+                        n = self._state.nodes[address]
+                        n.holder_role = ca.get("holder_role") or ""
+                        n.case_label  = ca.get("label")       or ""
+                        n.case_notes  = ca.get("notes")        or ""
+                    break
+            self._render(preserve_view=True)
+
+        if row:
+            AddressDialog(self, case_id=case_id, row=row, on_save=_on_save)
+        else:
+            prefill = {"address": address, "addr_type": "加密錢包",
+                       "chain_institution": chain}
+            AddressDialog(self, case_id=case_id, prefill=prefill, on_save=_on_save)
 
     def _expand_node(self, address: str):
         """點擊展開：呼叫主視窗的查詢 callback，結果由 add_profile_to_graph() 追加。"""
@@ -737,7 +1114,6 @@ class FlowGraphPanel(ctk.CTkFrame):
     def _set_node_role(self, address: str, role: str):
         if self._state:
             self._state.set_role(address, role)
-            self._pos = {}
             self._render()
 
     def _on_view_change(self, _=None):
@@ -746,7 +1122,8 @@ class FlowGraphPanel(ctk.CTkFrame):
     # ── 工具列操作 ────────────────────────────────────────────────────────────
 
     def _relayout(self):
-        self._pos = {}
+        self._pos_network = {}
+        self._pos_maltego = {}
         self._render()
 
     def _find_path_dialog(self):
@@ -806,33 +1183,44 @@ class FlowGraphPanel(ctk.CTkFrame):
             self._render()
 
     def _save_snapshot(self):
-        if not self._state:
+        """將目前幣流圖（含佈局座標）存入案件資料。有舊快照則覆蓋，無則新增。"""
+        if not self._state or not self._state.nodes:
             messagebox.showinfo("提示", "尚無幣流圖資料。", parent=self)
             return
-        if self._state.mode != "evidence":
+        case_id = getattr(self, "_current_case_id", None)
+        if not case_id:
             messagebox.showwarning(
-                "探索模式",
-                "目前為探索模式，快照不會存入案件資料庫。\n"
-                "請切換至「專案查詢 + 證據模式」後再儲存。",
+                "未開啟案件",
+                "請先在步驟 3 選擇或建立案件後再儲存幣流圖。",
                 parent=self)
             return
 
-        label = simpledialog.askstring("儲存快照", "快照名稱（選填）：", parent=self)
-        if label is None:
-            return
-
-        # 需要 case_id，由外部在 load_from_case 時帶入
-        case_id = getattr(self, "_current_case_id", None)
-        if not case_id:
-            messagebox.showwarning("提示", "無案件 ID，請確認已進入案件模式。",
-                                   parent=self)
-            return
-
         from database import db as _db
-        nodes, edges = self._state.to_snapshot()
-        snap_id = _db.save_graph_snapshot(case_id, self._state.chain,
-                                          nodes, edges, label or "")
-        messagebox.showinfo("已儲存", f"快照已儲存（ID: {snap_id}）。", parent=self)
+        nodes = [
+            {"address": n.address, "chain": n.chain, "role": n.role,
+             "custom_label": n.custom_label, "known_label": n.known_label,
+             "color": n.color, "expanded": n.expanded,
+             "holder_role": n.holder_role, "case_label": n.case_label,
+             "case_notes": n.case_notes}
+            for n in self._state.nodes.values()
+        ]
+        _, edges = self._state.to_snapshot()
+        pos_net = {k: list(map(float, v)) for k, v in self._pos_network.items()}
+        pos_mal = {k: list(map(float, v)) for k, v in self._pos_maltego.items()}
+
+        existing = _db.get_graph_snapshots(case_id)
+        if existing:
+            _db.update_graph_snapshot(
+                existing[0]["id"], nodes, edges,
+                pos_network=pos_net, pos_maltego=pos_mal,
+                chain=self._state.chain,
+            )
+        else:
+            _db.save_graph_snapshot(
+                case_id, self._state.chain, nodes, edges,
+                pos_network=pos_net, pos_maltego=pos_mal,
+            )
+        messagebox.showinfo("已儲存", "幣流圖已更新至案件資料。", parent=self)
 
     def _export_image(self):
         path = filedialog.asksaveasfilename(
@@ -849,6 +1237,77 @@ class FlowGraphPanel(ctk.CTkFrame):
             messagebox.showinfo("匯出完成", f"圖片已儲存至：\n{path}", parent=self)
         except Exception as e:
             messagebox.showerror("匯出失敗", str(e), parent=self)
+
+    def _save_graph_json(self):
+        """儲存幣流圖完整狀態（節點、交易、佈局位置）至 JSON 檔案。"""
+        if not self._state or not self._state.nodes:
+            messagebox.showinfo("提示", "尚無幣流圖資料。", parent=self)
+            return
+        path = filedialog.asksaveasfilename(
+            parent=self,
+            title="存檔幣流圖",
+            defaultextension=".json",
+            filetypes=[("幣流圖檔案", "*.json"), ("所有檔案", "*.*")],
+        )
+        if not path:
+            return
+        # 含涉案標記三欄位（to_snapshot 未包含）
+        nodes = [
+            {"address": n.address, "chain": n.chain, "role": n.role,
+             "custom_label": n.custom_label, "known_label": n.known_label,
+             "color": n.color, "expanded": n.expanded,
+             "holder_role": n.holder_role, "case_label": n.case_label,
+             "case_notes": n.case_notes}
+            for n in self._state.nodes.values()
+        ]
+        _, edges = self._state.to_snapshot()
+        data = {
+            "version": 1,
+            "chain": self._state.chain,
+            "mode":  self._state.mode,
+            "nodes": nodes,
+            "edges": edges,
+            "pos_network": {k: list(map(float, v))
+                            for k, v in self._pos_network.items()},
+            "pos_maltego": {k: list(map(float, v))
+                            for k, v in self._pos_maltego.items()},
+        }
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            messagebox.showinfo("存檔完成", f"幣流圖已儲存至：\n{path}", parent=self)
+        except Exception as e:
+            messagebox.showerror("存檔失敗", str(e), parent=self)
+
+    def _load_graph_json(self):
+        """從 JSON 檔案還原幣流圖（節點、交易、佈局位置）。"""
+        path = filedialog.askopenfilename(
+            parent=self,
+            title="讀取幣流圖",
+            filetypes=[("幣流圖檔案", "*.json"), ("所有檔案", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            messagebox.showerror("讀檔失敗", str(e), parent=self)
+            return
+        chain = data.get("chain", "ETH")
+        mode  = data.get("mode",  "explore")
+        self._state = GraphState.from_snapshot(
+            data.get("nodes", []),
+            data.get("edges", []),
+            chain=chain, mode=mode,
+        )
+        self._pos_network = {k: tuple(v)
+                             for k, v in data.get("pos_network", {}).items()}
+        self._pos_maltego = {k: tuple(v)
+                             for k, v in data.get("pos_maltego", {}).items()}
+        self._gen_mode.set(mode)
+        self._update_mode_label()
+        self._render()
 
     # ── 輔助 ──────────────────────────────────────────────────────────────────
 
@@ -881,8 +1340,12 @@ class FlowGraphPanel(ctk.CTkFrame):
         self.clipboard_append(text)
 
     def set_case_id(self, case_id: int | None):
-        """由主視窗在切換案件時傳入；None 代表清除。"""
+        """由主視窗在切換案件時傳入；case_id 改變時自動從快照還原；None 代表清除。"""
+        if case_id == getattr(self, "_current_case_id", None):
+            return   # 同一案件（如加入交易後再呼叫），不重新載入
         self._current_case_id = case_id
+        if case_id is not None:
+            self.load_from_case(case_id)
 
     # ── 司法金流圖（Maltego 風格）────────────────────────────────────────────
 
@@ -957,9 +1420,9 @@ class FlowGraphPanel(ctk.CTkFrame):
         self._state.rebuild_graph()
         G = self._state.G
 
-        if not self._pos or set(self._pos) != set(G.nodes):
-            self._pos = self._maltego_layout(G)
-        pos = self._pos
+        if not self._pos_maltego or set(self._pos_maltego) != set(G.nodes):
+            self._pos_maltego = self._maltego_layout(G)
+        pos = self._pos_maltego
 
         ax.set_xlim(-0.20, 1.20)
         ax.set_ylim(-0.12, 1.12)
@@ -1099,9 +1562,10 @@ class FlowGraphPanel(ctk.CTkFrame):
                 self._state = GraphState(chain=chain_var.get(), mode="explore")
                 self._gen_mode.set("explore")
                 self._update_mode_label()
+                self._pos_network = {}
+                self._pos_maltego = {}
             node = self._state.add_node(addr, role=role_var.get(),
                                         custom_label=e_label.get().strip())
-            self._pos = {}
             self._view_mode.set(VIEW_MALTEGO)
             self._render()
             dlg.destroy()
@@ -1219,7 +1683,6 @@ class FlowGraphPanel(ctk.CTkFrame):
                 tx_time=e_time.get().strip(),
                 tx_type="trc20" if is_token else "normal",
             ))
-            self._pos = {}
             self._view_mode.set(VIEW_MALTEGO)
             self._render()
             dlg.destroy()
@@ -1273,6 +1736,7 @@ class FlowGraphPanel(ctk.CTkFrame):
                         return (row[rk] or "").strip()
             return ""
 
+        was_fresh = (self._state is None)
         if self._state is None:
             self._state = GraphState(chain="TRX", mode="explore")
             self._gen_mode.set("explore")
@@ -1316,7 +1780,9 @@ class FlowGraphPanel(ctk.CTkFrame):
             ))
             imported += 1
 
-        self._pos = {}
+        if was_fresh:
+            self._pos_network = {}
+            self._pos_maltego = {}
         self._view_mode.set(VIEW_MALTEGO)
         self._render()
 
