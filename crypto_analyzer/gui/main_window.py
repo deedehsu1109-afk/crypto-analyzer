@@ -21,6 +21,7 @@ from database import db as _db
 from gui.case_window import CaseDialog, LinkToCaseDialog
 from gui.case_address_panel import CaseAddressPanel, AddressDialog
 from gui.flow_graph_panel import FlowGraphPanel
+from gui.cloudfail_panel import CloudFailPanel
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -119,6 +120,7 @@ class App(ctk.CTk):
         self._active_case: dict | None = None
         self._current_step        = 0
         self._case_addr_panel: CaseAddressPanel | None = None
+        self._cloudfail_panel: CloudFailPanel | None = None
         self._selected_case_id: int | None = None
         self._tx_rows_base:    list[dict] = []
         self._token_rows_base: list[dict] = []
@@ -370,36 +372,59 @@ class App(ctk.CTk):
         card = ctk.CTkFrame(page, corner_radius=14, fg_color="#1a2035")
         card.grid(row=1, column=0, pady=20, ipadx=10, ipady=6)
         card.grid_columnconfigure(1, weight=1)
+        card.grid_columnconfigure(3, weight=1)
 
         op = self.config_data.get("operator", {})
-        fields = [
-            ("姓名 *",       "identity_name",    "請輸入真實姓名",           True),
-            ("識別碼 *",     "identity_id",      "警員編號 / 調查員 ID",      True),
-            ("服務單位",     "identity_unit",    "例：刑事警察局",            False),
-            ("查詢目的",     "identity_purpose", "例：偵查 114 年刑案 XXXX 號", False),
-        ]
         self._identity_entries: dict[str, ctk.CTkEntry] = {}
-        for i, (label, key, placeholder, required) in enumerate(fields):
+
+        def _field(row: int, col_pair: int, label: str, key: str,
+                   placeholder: str, required: bool = False):
             color = "#fca5a5" if required else "#94a3b8"
+            lpad = (20, 8) if col_pair == 0 else (16, 8)
+            rpad = (0, 16) if col_pair == 0 else (0, 20)
             ctk.CTkLabel(card, text=label,
                          font=("Microsoft JhengHei", 12, "bold"),
-                         text_color=color, anchor="e", width=110).grid(
-                row=i, column=0, padx=(28, 10), pady=12, sticky="e")
+                         text_color=color, anchor="e", width=90).grid(
+                row=row, column=col_pair * 2,
+                padx=lpad, pady=10, sticky="e")
             e = ctk.CTkEntry(card, font=("Microsoft JhengHei", 12),
-                             placeholder_text=placeholder, width=340)
+                             placeholder_text=placeholder, width=280)
             e.insert(0, op.get(key, ""))
-            e.grid(row=i, column=1, padx=(0, 28), pady=12, sticky="w")
+            e.grid(row=row, column=col_pair * 2 + 1,
+                   padx=rpad, pady=10, sticky="ew")
             self._bind_entry_context_menu(e)
             self._identity_entries[key] = e
 
+        # 列 0：姓名（左）、識別碼（右）
+        _field(0, 0, "姓名 *",   "identity_name", "請輸入真實姓名",       required=True)
+        _field(0, 1, "識別碼 *", "identity_id",   "警員編號 / 調查員 ID", required=True)
+
+        # 分隔線
+        ctk.CTkFrame(card, height=1, fg_color="#2a3556").grid(
+            row=1, column=0, columnspan=4, sticky="ew", padx=20, pady=(2, 4))
+
+        # 列 2：機關（左）、機關地址（右）
+        _field(2, 0, "機關",     "identity_agency",         "例：內政部警政署刑事警察局")
+        _field(2, 1, "機關地址", "identity_agency_address", "例：台北市大安區…")
+
+        # 列 3：單位（左）、職稱（右）
+        _field(3, 0, "單位", "identity_unit",  "例：科技犯罪偵查隊")
+        _field(3, 1, "職稱", "identity_title", "例：偵查員")
+
+        # 列 4：電話（左）、Email（右）
+        _field(4, 0, "電話",  "identity_phone", "例：+886-2-27697399")
+        _field(4, 1, "Email", "identity_email", "例：xxx@cib.npa.gov.tw")
+
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ctk.CTkFrame(card, height=1, fg_color="#2a3556").grid(
+            row=5, column=0, columnspan=4, sticky="ew", padx=20, pady=(4, 0))
         ctk.CTkLabel(card, text="確認時間",
                      font=("Microsoft JhengHei", 12, "bold"),
-                     text_color="#94a3b8", anchor="e", width=110).grid(
-            row=len(fields), column=0, padx=(28, 10), pady=12, sticky="e")
+                     text_color="#94a3b8", anchor="e", width=90).grid(
+            row=6, column=0, padx=(20, 8), pady=10, sticky="e")
         ctk.CTkLabel(card, text=now_str,
                      font=("Consolas", 12), text_color="#60a5fa").grid(
-            row=len(fields), column=1, padx=(0, 28), pady=12, sticky="w")
+            row=6, column=1, columnspan=3, padx=(0, 20), pady=10, sticky="w")
 
         bottom = ctk.CTkFrame(page, fg_color="transparent")
         bottom.grid(row=2, column=0, pady=(4, 32))
@@ -428,9 +453,14 @@ class App(ctk.CTk):
         op["confirmed_at"] = datetime.datetime.now().isoformat()
         self.config_data["operator"] = op
         save_config(self.config_data)
+        agency = op.get("identity_agency", "")
+        unit   = op.get("identity_unit", "")
+        title  = op.get("identity_title", "")
+        suffix = "　".join(v for v in (agency, unit, title) if v)
         self.status_var.set(
-            f"已確認：{name}（{iden}）　"
-            f"時間：{datetime.datetime.now().strftime('%H:%M:%S')}")
+            f"已確認：{name}（{iden}）"
+            + (f"　{suffix}" if suffix else "")
+            + f"　時間：{datetime.datetime.now().strftime('%H:%M:%S')}")
         self._show_step(2)
 
     # ═══════════════════════════════════════════════════════════════════════════
@@ -707,7 +737,8 @@ class App(ctk.CTk):
         # ── 右側：功能分頁 ──
         tabs = ctk.CTkTabview(page, corner_radius=8)
         tabs.grid(row=0, column=1, sticky="nsew", padx=(0, 8), pady=8)
-        for name in ["🔍  地址側寫", "🔗  Hash 分析", "📁  涉案錢包/帳戶", "📜  查詢歷史"]:
+        for name in ["🔍  地址側寫", "🔗  Hash 分析", "📁  涉案錢包/帳戶",
+                      "📜  查詢歷史", "🌐  網站溯源"]:
             tabs.add(name)
         self._data_tabs = tabs
 
@@ -715,6 +746,7 @@ class App(ctk.CTk):
         self._build_hash_tab(tabs.tab("🔗  Hash 分析"))
         self._build_addr_tab(tabs.tab("📁  涉案錢包/帳戶"))
         self._build_history_tab(tabs.tab("📜  查詢歷史"))
+        self._build_cloudfail_tab(tabs.tab("🌐  網站溯源"))
 
     def _build_case_sidebar(self, page):
         sidebar = ctk.CTkFrame(page, corner_radius=8,
@@ -1469,6 +1501,38 @@ class App(ctk.CTk):
 
         self._load_history()
 
+    # ── 網站溯源分頁 ──────────────────────────────────────────────────────────
+
+    def _build_cloudfail_tab(self, parent: ctk.CTkFrame):
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_rowconfigure(0, weight=1)
+
+        def _get_case_id() -> int | None:
+            return self._active_case["id"] if self._active_case else None
+
+        def _get_case_name() -> str:
+            if self._active_case:
+                return f"{self._active_case['case_number']} {self._active_case['case_name']}"
+            return "（未選擇案件）"
+
+        def _on_add_addr(data: dict) -> None:
+            case_id = _get_case_id()
+            if not case_id:
+                return
+            _db.upsert_case_address(case_id, data)
+            if self._case_addr_panel:
+                self._case_addr_panel._load()
+
+        self._cloudfail_panel = CloudFailPanel(
+            parent,
+            get_case_id=_get_case_id,
+            get_case_name=_get_case_name,
+            on_add_address=_on_add_addr,
+            corner_radius=0,
+            fg_color="transparent",
+        )
+        self._cloudfail_panel.grid(row=0, column=0, sticky="nsew")
+
     # ═══════════════════════════════════════════════════════════════════════════
     # 頁面 5：幣流圖
     # ═══════════════════════════════════════════════════════════════════════════
@@ -1551,7 +1615,7 @@ class App(ctk.CTk):
 
         # 右：案件分析報告
         right = ctk.CTkFrame(page, corner_radius=10, fg_color="#0f1520")
-        right.grid(row=1, column=1, sticky="nsew", padx=(4, 10), pady=(4, 10))
+        right.grid(row=1, column=1, sticky="nsew", padx=(4, 10), pady=(4, 4))
         right.grid_columnconfigure(0, weight=1)
         right.grid_rowconfigure(2, weight=1)
 
@@ -1574,6 +1638,63 @@ class App(ctk.CTk):
                       fg_color="#4c1d95", hover_color="#3b1a7a",
                       height=42, command=self._generate_case_report).grid(
             row=3, column=0, padx=12, pady=(0, 16), sticky="ew")
+
+        # ── 底部：交易所調閱申請書（橫跨兩欄） ──
+        inquiry = ctk.CTkFrame(page, corner_radius=10, fg_color="#0f1a1f")
+        inquiry.grid(row=2, column=0, columnspan=2, sticky="ew",
+                     padx=10, pady=(0, 10))
+        inquiry.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(inquiry, text="📨",
+                     font=("Arial", 26)).grid(
+            row=0, column=0, rowspan=2, padx=(18, 4), pady=16, sticky="w")
+
+        ctk.CTkLabel(inquiry, text="交易所調閱申請書",
+                     font=("Microsoft JhengHei", 15, "bold"),
+                     text_color="#34d399").grid(
+            row=0, column=1, padx=4, pady=(14, 0), sticky="w")
+        ctk.CTkLabel(inquiry,
+                     text="依案件資料填寫並產製寄往交易所（OKX / Binance / Bybit…）的正式調閱申請書"
+                          "　　支援格式：.docx　.odt　.pdf",
+                     font=("Microsoft JhengHei", 10),
+                     text_color="gray50", justify="left").grid(
+            row=1, column=1, padx=4, pady=(0, 14), sticky="w")
+
+        info_bar = ctk.CTkFrame(inquiry, fg_color="transparent")
+        info_bar.grid(row=0, column=2, rowspan=2, padx=(0, 16), pady=12, sticky="e")
+
+        for tag, desc, color in [
+            ("中英雙語", "符合交易所格式", "#6ee7b7"),
+            ("自動帶入", "機關/聯絡資訊", "#93c5fd"),
+            ("批次選址", "勾選涉案地址", "#fcd34d"),
+        ]:
+            badge = ctk.CTkFrame(info_bar, fg_color="#1a2a1f", corner_radius=10)
+            badge.pack(side="left", padx=4)
+            ctk.CTkLabel(badge, text=tag,
+                         font=("Microsoft JhengHei", 10, "bold"),
+                         text_color=color).pack(padx=10, pady=(4, 0))
+            ctk.CTkLabel(badge, text=desc,
+                         font=("Microsoft JhengHei", 9),
+                         text_color="gray60").pack(padx=10, pady=(0, 4))
+
+        ctk.CTkButton(inquiry,
+                      text="📨  開啟申請書填表",
+                      font=("Microsoft JhengHei", 12, "bold"),
+                      height=40, width=180,
+                      fg_color="#065f46", hover_color="#064e3b",
+                      corner_radius=20,
+                      command=self._open_inquiry_dialog).grid(
+            row=0, column=3, rowspan=2, padx=(8, 20), pady=12)
+
+    def _open_inquiry_dialog(self):
+        from gui.exchange_inquiry_dialog import ExchangeInquiryDialog
+        from database import db as _db2
+        operator  = self.config_data.get("operator", {})
+        case      = self._active_case or {}
+        addresses = _db2.get_case_addresses(case["id"]) if case else []
+        out_dir   = self._report_outdir_entry.get().strip()
+        ExchangeInquiryDialog(self, operator=operator, case=case,
+                              addresses=addresses, out_dir=out_dir)
 
     def _report_browse_dir(self):
         d = filedialog.askdirectory(title="選擇報告輸出目錄")

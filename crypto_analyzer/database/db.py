@@ -211,6 +211,20 @@ def init_db():
             updated_at   TEXT DEFAULT (datetime('now','localtime'))
         );
         CREATE INDEX IF NOT EXISTS idx_chain_tx_case ON case_chain_transactions(case_id);
+
+        -- ── 網站溯源掃描紀錄 ────────────────────────────────────────────────────
+        CREATE TABLE IF NOT EXISTS domain_scans (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id      INTEGER REFERENCES cases(id) ON DELETE CASCADE,
+            target       TEXT NOT NULL,
+            resolved_ip  TEXT,
+            is_cloudflare INTEGER DEFAULT 0,
+            has_wildcard  INTEGER DEFAULT 0,
+            passive_only  INTEGER DEFAULT 0,
+            result_json  TEXT,   -- 完整 scan_domain() 回傳值
+            created_at   TEXT DEFAULT (datetime('now','localtime'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_domain_scans_case ON domain_scans(case_id);
         """)
         # 遷移：對舊資料庫補欄位（若尚未存在）
         _migrate(con)
@@ -999,3 +1013,50 @@ def get_graph_snapshots(case_id: int) -> list[dict]:
 def delete_graph_snapshot(snapshot_id: int):
     with _conn() as con:
         con.execute("DELETE FROM graph_snapshots WHERE id=?", (snapshot_id,))
+
+
+# ── 網站溯源掃描紀錄 ───────────────────────────────────────────────────────────
+
+def save_domain_scan(case_id: int, result: dict) -> int:
+    """儲存一次網站溯源掃描結果，回傳 scan_id。"""
+    with _conn() as con:
+        cur = con.execute(
+            """INSERT INTO domain_scans
+               (case_id, target, resolved_ip, is_cloudflare, has_wildcard, passive_only, result_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                case_id,
+                result.get("target", ""),
+                result.get("resolved_ip", ""),
+                1 if result.get("is_cloudflare") else 0,
+                1 if result.get("has_wildcard") else 0,
+                1 if result.get("passive_only") else 0,
+                json.dumps(result, ensure_ascii=False),
+            ),
+        )
+        return cur.lastrowid
+
+
+def get_domain_scans(case_id: int) -> list[dict]:
+    """讀取案件的所有網站溯源紀錄，不含完整 result_json。"""
+    with _conn() as con:
+        rows = con.execute(
+            """SELECT id, target, resolved_ip, is_cloudflare, has_wildcard, created_at
+               FROM domain_scans WHERE case_id=? ORDER BY created_at DESC""",
+            (case_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_domain_scan_result(scan_id: int) -> dict | None:
+    """讀取指定掃描的完整 result_json。"""
+    with _conn() as con:
+        row = con.execute(
+            "SELECT result_json FROM domain_scans WHERE id=?", (scan_id,)
+        ).fetchone()
+    if row and row["result_json"]:
+        try:
+            return json.loads(row["result_json"])
+        except Exception:
+            pass
+    return None
