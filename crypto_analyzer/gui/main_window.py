@@ -22,6 +22,7 @@ from gui.case_window import CaseDialog, LinkToCaseDialog
 from gui.case_address_panel import CaseAddressPanel, AddressDialog
 from gui.flow_graph_panel import FlowGraphPanel
 from gui.cloudfail_panel import CloudFailPanel
+from gui.manual_dialog import ManualDialog
 from api import update_checker
 
 ctk.set_appearance_mode("dark")
@@ -217,12 +218,19 @@ class App(ctk.CTk):
                 ctk.CTkLabel(mid, text="›", font=("Arial", 14),
                              text_color="#2d3748").pack(side="left", padx=1)
 
+        ctk.CTkButton(bar, text="📖", width=34, height=34,
+                      font=("Arial", 15), corner_radius=17,
+                      fg_color="transparent", hover_color="#1a2535",
+                      text_color="gray50",
+                      command=self._open_manual).grid(
+            row=0, column=2, padx=(0, 4), pady=10)
+
         ctk.CTkButton(bar, text="⚙", width=34, height=34,
                       font=("Arial", 15), corner_radius=17,
                       fg_color="transparent", hover_color="#1a2535",
                       text_color="gray50",
                       command=self._open_settings).grid(
-            row=0, column=2, padx=(0, 14), pady=10)
+            row=0, column=3, padx=(0, 14), pady=10)
 
     def _on_step_click(self, idx: int):
         if idx >= 3 and not self._active_case:
@@ -271,6 +279,11 @@ class App(ctk.CTk):
         self._show_step(3)
         if hasattr(self, "_data_tabs"):
             self._data_tabs.set(tab_name)
+
+    # ── 操作手冊 ──────────────────────────────────────────────────────────────
+
+    def _open_manual(self):
+        ManualDialog(self)
 
     # ── 設定對話框 ────────────────────────────────────────────────────────────
 
