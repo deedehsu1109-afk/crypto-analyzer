@@ -118,6 +118,11 @@ class App(ctk.CTk):
         self.geometry("1400x900")
         self.resizable(True, True)
         self.config_data          = load_config()
+        # 記錄本程式「啟動當下」的本機 git HEAD，用來偵測「本機原始碼在本程式
+        # 啟動後又被直接修改／push」的情況（此時 local 與 origin 早已一致，
+        # 單純比對 local vs origin 不會發現任何更新，但目前執行中的行程其實
+        # 仍是啟動當時載入的舊程式碼）
+        self._startup_head = update_checker.get_local_head()
         self._profile: dict | None = None
         self._active_case: dict | None = None
         self._current_step        = 0
@@ -496,13 +501,31 @@ class App(ctk.CTk):
         self._update_status_lbl.configure(text="檢查中…", text_color="gray50")
 
         def worker():
-            result = update_checker.check_for_update()
-            self.after(0, lambda: self._on_update_check_done(result))
+            # 先檢查「本行程啟動後，本機原始碼是否已被直接修改」——這種情況下
+            # local 與 origin 可能早已一致（例如變更剛被 push 完），單純比對
+            # GitHub 遠端不會發現任何差異，但目前執行中的行程仍是啟動時的舊碼
+            current_head = update_checker.get_local_head()
+            stale_process = bool(self._startup_head and current_head
+                                  and current_head != self._startup_head)
+            result = None if stale_process else update_checker.check_for_update()
+            self.after(0, lambda: self._on_update_check_done(result, stale_process))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _on_update_check_done(self, result: dict):
+    def _on_update_check_done(self, result: dict | None, stale_process: bool = False):
         self._update_check_btn.configure(state="normal")
+
+        if stale_process:
+            self._update_status_lbl.configure(text="🆕 本機程式碼已變更", text_color="#facc15")
+            proceed = messagebox.askyesno(
+                "偵測到本機程式碼已更新",
+                "本程式啟動之後，本機原始碼已經被更新（磁碟上的程式碼已經是新版本，"
+                "但目前執行中的視窗仍是啟動當時載入的舊版本）。\n\n"
+                "不需要再從 GitHub 下載，直接重新啟動即可套用最新程式碼。\n\n"
+                "是否立即重新啟動？")
+            if proceed:
+                update_checker.restart_app()
+            return
 
         if result.get("error"):
             self._update_status_lbl.configure(text=f"❌ 檢查失敗：{result['error']}",

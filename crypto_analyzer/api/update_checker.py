@@ -18,6 +18,15 @@ def _run_git(args: list[str], timeout: int = 15) -> subprocess.CompletedProcess:
     )
 
 
+def get_local_head() -> str:
+    """回傳本機目前的 git HEAD commit SHA（取不到時回傳空字串）。"""
+    try:
+        result = _run_git(["rev-parse", "HEAD"])
+        return result.stdout.strip() if result.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
 def has_local_changes() -> bool:
     """是否有尚未提交的本機修改（更新前需先確認，避免 git pull 造成衝突或遺失變更）。"""
     try:
@@ -32,6 +41,14 @@ def check_for_update() -> dict:
     向 origin 執行 git fetch 後比對本機與遠端 main 分支的差異。
     回傳：
         {"available": bool, "local": str, "remote": str, "log": str, "error": str|None}
+
+    注意：這裡比對的是「本機 git 倉庫」與「GitHub 遠端」的差異，適用於「別台機器
+    push 了新版本」的一般情境。若同一台機器上，本機倉庫本身在本程式啟動「之後」
+    就已經被直接修改並 push（例如開發時直接在同一份工作目錄編輯），push 完成後
+    本機 HEAD 會與 origin 一致，此函式會回報「已是最新版本」——但當下這個「已啟動
+    的行程」記憶體內仍是啟動當時載入的舊程式碼。這種「本行程本身已過時」的情況
+    請改用 get_local_head() 搭配程式啟動時記錄的 HEAD 比對，見 main_window.py
+    的 self._startup_head。
     """
     try:
         fetch = _run_git(["fetch", "origin", "main"], timeout=20)
