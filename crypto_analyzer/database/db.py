@@ -212,6 +212,35 @@ def init_db():
         );
         CREATE INDEX IF NOT EXISTS idx_chain_tx_case ON case_chain_transactions(case_id);
 
+        -- ── 被害人陳述交易紀錄（整合銀行/區塊鏈，容納口述資料的不確定性）──────────
+        CREATE TABLE IF NOT EXISTS case_stated_transactions (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id             INTEGER REFERENCES cases(id) ON DELETE CASCADE,
+            method              TEXT DEFAULT '不明',   -- 銀行轉帳/場外交易(OTC)/場內交易(交易所)/
+                                                        -- 透過交易所轉帳/私人幣商現金交易/其他/不明
+            direction           TEXT DEFAULT '不明',   -- 支出（被害人付出）/ 收入（被害人收到）/ 不明
+            time_precision      TEXT DEFAULT '不確定', -- 精確時間/大約時間/僅知先後順序/不確定
+            tx_date             TEXT,           -- YYYY-MM-DD（可留白）
+            tx_time             TEXT,           -- HH:MM（可留白）
+            time_desc           TEXT,           -- 概略時間描述，如「約下午」「詐騙初期第二筆」
+            amount              REAL,
+            currency            TEXT,           -- TWD/USD 或 USDT/TRX/ETH 等，自由輸入
+            counterpart_desc    TEXT,           -- 對象描述，如「自稱OKX幣商 LINE ID:xxx」
+            bank_name           TEXT,           -- 銀行名稱（銀行轉帳/現金交易時可能有）
+            account_no          TEXT,           -- 我方帳號
+            counterpart_account TEXT,           -- 對方帳號
+            chain               TEXT,           -- TRX/ETH/BTC…（區塊鏈相關時填寫）
+            tx_hash             TEXT,
+            from_addr           TEXT,
+            to_addr             TEXT,
+            notes               TEXT,
+            source_doc          TEXT,
+            legacy_ref          TEXT,           -- 由舊資料表遷移時的來源標記（如 'bank:12'），供遷移去重用
+            created_at          TEXT DEFAULT (datetime('now','localtime')),
+            updated_at          TEXT DEFAULT (datetime('now','localtime'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_stated_tx_case ON case_stated_transactions(case_id);
+
         -- ── 網站溯源掃描紀錄 ────────────────────────────────────────────────────
         CREATE TABLE IF NOT EXISTS domain_scans (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -249,6 +278,50 @@ def _migrate(con: sqlite3.Connection):
     # case_id 欄位存在後才能建索引
     con.execute("CREATE INDEX IF NOT EXISTS idx_wallets_case ON wallets(case_id)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_lookups_case ON tx_lookups(case_id)")
+    _migrate_legacy_transactions(con)
+
+
+def _migrate_legacy_transactions(con: sqlite3.Connection):
+    """將舊版「一般帳戶交易」「區塊鏈交易」資料一次性遷移至統一的
+    case_stated_transactions（以 legacy_ref 標記避免重複遷移）。
+    舊資料表不刪除，僅停止在新版 GUI 中使用，作為歷史備份。"""
+    migrated = {r[0] for r in con.execute(
+        "SELECT legacy_ref FROM case_stated_transactions WHERE legacy_ref IS NOT NULL"
+    ).fetchall()}
+
+    for row in con.execute("SELECT * FROM case_bank_transactions").fetchall():
+        ref = f"bank:{row['id']}"
+        if ref in migrated:
+            continue
+        con.execute("""
+            INSERT INTO case_stated_transactions
+                (case_id, method, direction, time_precision, tx_date, tx_time,
+                 amount, currency, counterpart_desc, bank_name, account_no,
+                 counterpart_account, notes, source_doc, legacy_ref,
+                 created_at, updated_at)
+            VALUES (?, '不明', ?, '不確定', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (row["case_id"], row["direction"], row["tx_date"], row["tx_time"],
+              row["amount"], row["currency"], row["counterpart_name"],
+              row["bank_name"], row["account_no"], row["counterpart_account"],
+              row["notes"], row["source_doc"], ref,
+              row["created_at"], row["updated_at"]))
+
+    for row in con.execute("SELECT * FROM case_chain_transactions").fetchall():
+        ref = f"chain:{row['id']}"
+        if ref in migrated:
+            continue
+        dt = (row["tx_datetime"] or "").strip()
+        tx_date, tx_time = (dt.split(" ", 1) + [""])[:2] if dt else ("", "")
+        con.execute("""
+            INSERT INTO case_stated_transactions
+                (case_id, method, direction, time_precision, tx_date, tx_time,
+                 amount, currency, chain, tx_hash, from_addr, to_addr,
+                 notes, source_doc, legacy_ref, created_at, updated_at)
+            VALUES (?, '不明', ?, '不確定', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (row["case_id"], row["direction"], tx_date, tx_time,
+              row["amount"], row["token_symbol"], row["chain"], row["tx_hash"],
+              row["from_addr"], row["to_addr"], row["notes"], row["source_doc"],
+              ref, row["created_at"], row["updated_at"]))
 
 
 # ── 儲存錢包分析結果 ──────────────────────────────────────────────────────────
@@ -912,6 +985,51 @@ def upsert_chain_transaction(case_id: int, data: dict) -> int:
 def delete_chain_transaction(tx_id: int):
     with _conn() as con:
         con.execute("DELETE FROM case_chain_transactions WHERE id=?", (tx_id,))
+
+
+# ── 被害人陳述交易紀錄（整合銀行/區塊鏈）─────────────────────────────────────
+
+def get_stated_transactions(case_id: int) -> list[dict]:
+    with _conn() as con:
+        rows = con.execute(
+            "SELECT * FROM case_stated_transactions WHERE case_id=? "
+            "ORDER BY tx_date DESC, tx_time DESC, id DESC",
+            (case_id,)
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+_STATED_TX_FIELDS = [
+    "method", "direction", "time_precision", "tx_date", "tx_time", "time_desc",
+    "amount", "currency", "counterpart_desc", "bank_name", "account_no",
+    "counterpart_account", "chain", "tx_hash", "from_addr", "to_addr",
+    "notes", "source_doc",
+]
+
+
+def upsert_stated_transaction(case_id: int, data: dict) -> int:
+    fields = _STATED_TX_FIELDS
+    row_id = data.get("id")
+    if row_id:
+        sets = ", ".join(f"{f}=?" for f in fields)
+        sets += ", updated_at=datetime('now','localtime')"
+        vals = [data.get(f) for f in fields] + [row_id]
+        with _conn() as con:
+            con.execute(f"UPDATE case_stated_transactions SET {sets} WHERE id=?", vals)
+        return row_id
+    else:
+        cols = ", ".join(["case_id"] + fields)
+        qs   = ", ".join(["?"] * (len(fields) + 1))
+        vals = [case_id] + [data.get(f) for f in fields]
+        with _conn() as con:
+            cur = con.execute(
+                f"INSERT INTO case_stated_transactions ({cols}) VALUES ({qs})", vals)
+            return cur.lastrowid
+
+
+def delete_stated_transaction(tx_id: int):
+    with _conn() as con:
+        con.execute("DELETE FROM case_stated_transactions WHERE id=?", (tx_id,))
 
 
 # ── 幣流圖：邊資料接口 ────────────────────────────────────────────────────────

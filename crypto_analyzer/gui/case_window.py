@@ -4,8 +4,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import customtkinter as ctk
 from database import db as _db
-from gui.case_bank_tx_panel import CaseBankTxPanel
-from gui.case_chain_tx_panel import CaseChainTxPanel
+from gui.case_stated_tx_panel import CaseStatedTxPanel
 
 _CASE_TYPES    = ["一般", "詐欺", "洗錢", "資恐", "勒索軟體", "非法交易所", "其他"]
 _CASE_STATUSES = ["進行中", "已結案", "暫停", "移送"]
@@ -63,14 +62,13 @@ class CaseDialog(ctk.CTkToplevel):
         # ── 分頁內容 ──
         self._tabs = ctk.CTkTabview(self, corner_radius=10)
         self._tabs.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 4))
-        for name in ["案件基本資料", "涉案錢包 / 帳戶", "一般帳戶交易", "區塊鏈交易"]:
+        for name in ["案件基本資料", "涉案錢包 / 帳戶", "被害人陳述交易紀錄"]:
             self._tabs.add(name)
         self._tabs.set("案件基本資料")
 
         self._build_basic_tab()
         self._build_address_tab()
-        self._build_bank_tx_tab()
-        self._build_chain_tx_tab()
+        self._build_stated_tx_tab()
 
         # ── 底部按鈕 ──
         btn_f = ctk.CTkFrame(self, fg_color="transparent")
@@ -224,70 +222,38 @@ class CaseDialog(ctk.CTkToplevel):
             text=f"案件 ID：{self._case_id}　可新增、編輯、從文件提取涉案錢包地址或金融帳戶。",
             text_color="#aaffaa")
 
-    # ── 分頁三：一般帳戶交易 ──────────────────────────────────────────────────
+    # ── 分頁三：被害人陳述交易紀錄 ────────────────────────────────────────────
 
-    def _build_bank_tx_tab(self):
-        tab = self._tabs.tab("一般帳戶交易")
+    def _build_stated_tx_tab(self):
+        tab = self._tabs.tab("被害人陳述交易紀錄")
         tab.grid_columnconfigure(0, weight=1)
         tab.grid_rowconfigure(1, weight=1)
 
-        self._bank_hint_lbl = ctk.CTkLabel(
+        self._stated_hint_lbl = ctk.CTkLabel(
             tab,
-            text="請先在「案件基本資料」填寫案件名稱並點「儲存案件」，即可新增一般帳戶交易記錄。",
+            text="請先在「案件基本資料」填寫案件名稱並點「儲存案件」，即可新增交易紀錄。",
             font=("Microsoft JhengHei", 11), text_color="#f5a623")
-        self._bank_hint_lbl.grid(row=0, column=0, padx=12, pady=(8, 2), sticky="w")
+        self._stated_hint_lbl.grid(row=0, column=0, padx=12, pady=(8, 2), sticky="w")
 
-        self._bank_panel_container = ctk.CTkFrame(tab, corner_radius=8)
-        self._bank_panel_container.grid(row=1, column=0,
-                                        sticky="nsew", padx=4, pady=(0, 4))
-        self._bank_panel_container.grid_columnconfigure(0, weight=1)
-        self._bank_panel_container.grid_rowconfigure(0, weight=1)
-        self._bank_tx_panel: CaseBankTxPanel | None = None
+        self._stated_panel_container = ctk.CTkFrame(tab, corner_radius=8)
+        self._stated_panel_container.grid(row=1, column=0,
+                                          sticky="nsew", padx=4, pady=(0, 4))
+        self._stated_panel_container.grid_columnconfigure(0, weight=1)
+        self._stated_panel_container.grid_rowconfigure(0, weight=1)
+        self._stated_tx_panel: CaseStatedTxPanel | None = None
 
         if self._case_id:
-            self._init_bank_tx_panel()
+            self._init_stated_tx_panel()
 
-    def _init_bank_tx_panel(self):
-        for w in self._bank_panel_container.winfo_children():
+    def _init_stated_tx_panel(self):
+        for w in self._stated_panel_container.winfo_children():
             w.destroy()
-        self._bank_tx_panel = CaseBankTxPanel(
-            self._bank_panel_container, self._case_id)
-        self._bank_tx_panel.grid(row=0, column=0, sticky="nsew")
-        self._bank_hint_lbl.configure(
-            text=f"案件 ID：{self._case_id}　記錄一般金融帳戶交易（銀行轉帳、ATM 等）。",
-            text_color="#aaffaa")
-
-    # ── 分頁四：區塊鏈交易 ───────────────────────────────────────────────────
-
-    def _build_chain_tx_tab(self):
-        tab = self._tabs.tab("區塊鏈交易")
-        tab.grid_columnconfigure(0, weight=1)
-        tab.grid_rowconfigure(1, weight=1)
-
-        self._chain_hint_lbl = ctk.CTkLabel(
-            tab,
-            text="請先在「案件基本資料」填寫案件名稱並點「儲存案件」，即可新增區塊鏈交易記錄。",
-            font=("Microsoft JhengHei", 11), text_color="#f5a623")
-        self._chain_hint_lbl.grid(row=0, column=0, padx=12, pady=(8, 2), sticky="w")
-
-        self._chain_panel_container = ctk.CTkFrame(tab, corner_radius=8)
-        self._chain_panel_container.grid(row=1, column=0,
-                                         sticky="nsew", padx=4, pady=(0, 4))
-        self._chain_panel_container.grid_columnconfigure(0, weight=1)
-        self._chain_panel_container.grid_rowconfigure(0, weight=1)
-        self._chain_tx_panel: CaseChainTxPanel | None = None
-
-        if self._case_id:
-            self._init_chain_tx_panel()
-
-    def _init_chain_tx_panel(self):
-        for w in self._chain_panel_container.winfo_children():
-            w.destroy()
-        self._chain_tx_panel = CaseChainTxPanel(
-            self._chain_panel_container, self._case_id)
-        self._chain_tx_panel.grid(row=0, column=0, sticky="nsew")
-        self._chain_hint_lbl.configure(
-            text=f"案件 ID：{self._case_id}　記錄區塊鏈交易（TRX / ETH / BTC 等）。",
+        self._stated_tx_panel = CaseStatedTxPanel(
+            self._stated_panel_container, self._case_id)
+        self._stated_tx_panel.grid(row=0, column=0, sticky="nsew")
+        self._stated_hint_lbl.configure(
+            text=f"案件 ID：{self._case_id}　記錄被害人陳述的交易（銀行轉帳／OTC／交易所／幣商現金交易等，"
+                 "時間與交易方式皆可概略填寫）。",
             text_color="#aaffaa")
 
     # ── 匯入案件編號 ──────────────────────────────────────────────────────────
@@ -314,8 +280,7 @@ class CaseDialog(ctk.CTkToplevel):
         self.case     = found
         self._fill(found)
         self._init_victim_panel()
-        self._init_bank_tx_panel()
-        self._init_chain_tx_panel()
+        self._init_stated_tx_panel()
         self._import_entry.delete(0, "end")
         self.title(f"編輯案件：{found['case_number']}")
 
@@ -497,10 +462,8 @@ class CaseDialog(ctk.CTkToplevel):
             # 初始化各分頁面板（若尚未建立）
             if self._victim_tx_panel is None:
                 self._init_victim_panel()
-            if self._bank_tx_panel is None:
-                self._init_bank_tx_panel()
-            if self._chain_tx_panel is None:
-                self._init_chain_tx_panel()
+            if self._stated_tx_panel is None:
+                self._init_stated_tx_panel()
             # 補匯入暫存的文件分析地址/帳戶
             pending_msg = ""
             if self._pending_addrs:
