@@ -22,6 +22,7 @@ from gui.case_window import CaseDialog, LinkToCaseDialog
 from gui.case_address_panel import CaseAddressPanel, AddressDialog
 from gui.flow_graph_panel import FlowGraphPanel
 from gui.cloudfail_panel import CloudFailPanel
+from api import update_checker
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -369,6 +370,18 @@ class App(ctk.CTk):
                      text="每次開啟系統均須確認，姓名與識別碼將納入操作稽核軌跡",
                      font=("Microsoft JhengHei", 11), text_color="gray50").pack(pady=(6, 0))
 
+        update_row = ctk.CTkFrame(title_f, fg_color="transparent")
+        update_row.pack(pady=(10, 0))
+        self._update_check_btn = ctk.CTkButton(
+            update_row, text="🔄 檢查更新",
+            font=("Microsoft JhengHei", 11),
+            width=120, height=30, fg_color="gray30", hover_color="gray20",
+            command=self._on_check_update)
+        self._update_check_btn.pack(side="left", padx=(0, 8))
+        self._update_status_lbl = ctk.CTkLabel(
+            update_row, text="", font=("Microsoft JhengHei", 11), text_color="gray50")
+        self._update_status_lbl.pack(side="left")
+
         card = ctk.CTkFrame(page, corner_radius=14, fg_color="#1a2035")
         card.grid(row=1, column=0, pady=20, ipadx=10, ipady=6)
         card.grid_columnconfigure(1, weight=1)
@@ -462,6 +475,66 @@ class App(ctk.CTk):
             + (f"　{suffix}" if suffix else "")
             + f"　時間：{datetime.datetime.now().strftime('%H:%M:%S')}")
         self._show_step(2)
+
+    # ── 檢查更新 ─────────────────────────────────────────────────────────────
+
+    def _on_check_update(self):
+        self._update_check_btn.configure(state="disabled")
+        self._update_status_lbl.configure(text="檢查中…", text_color="gray50")
+
+        def worker():
+            result = update_checker.check_for_update()
+            self.after(0, lambda: self._on_update_check_done(result))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_update_check_done(self, result: dict):
+        self._update_check_btn.configure(state="normal")
+
+        if result.get("error"):
+            self._update_status_lbl.configure(text=f"❌ 檢查失敗：{result['error']}",
+                                               text_color="#f87171")
+            return
+
+        if not result.get("available"):
+            self._update_status_lbl.configure(text="✓ 已是最新版本", text_color="#4ade80")
+            return
+
+        self._update_status_lbl.configure(text="🆕 發現新版本", text_color="#facc15")
+        log = result.get("log", "") or "（無法取得變更摘要）"
+        proceed = messagebox.askyesno(
+            "發現新版本",
+            f"GitHub 上有比目前版本更新的內容：\n\n{log}\n\n是否立即更新並重新啟動程式？")
+        if proceed:
+            self._begin_apply_update()
+
+    def _begin_apply_update(self):
+        if update_checker.has_local_changes():
+            messagebox.showwarning(
+                "無法自動更新",
+                "偵測到本機有尚未提交的異動，為避免覆蓋或遺失資料，已取消自動更新。\n"
+                "請先手動處理（提交或還原變更）後再試一次。")
+            return
+
+        self._update_check_btn.configure(state="disabled")
+        self._update_status_lbl.configure(text="更新中…", text_color="gray50")
+
+        def worker():
+            success, msg = update_checker.apply_update()
+            self.after(0, lambda: self._on_update_applied(success, msg))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_update_applied(self, success: bool, msg: str):
+        self._update_check_btn.configure(state="normal")
+        if not success:
+            self._update_status_lbl.configure(text="❌ 更新失敗", text_color="#f87171")
+            messagebox.showerror("更新失敗", f"套用更新時發生錯誤：\n\n{msg}")
+            return
+
+        self._update_status_lbl.configure(text="✓ 更新完成，即將重新啟動…", text_color="#4ade80")
+        messagebox.showinfo("更新完成", "已成功更新，程式將重新啟動以套用變更。")
+        update_checker.restart_app()
 
     # ═══════════════════════════════════════════════════════════════════════════
     # 頁面 3：案件選擇

@@ -957,9 +957,11 @@ def get_edges_for_graph(case_id: int = None, chain: str = None,
 def save_graph_snapshot(case_id: int, chain: str, nodes: list, edges: list,
                         label: str = "",
                         pos_network: dict = None,
-                        pos_maltego: dict = None) -> int:
-    """新增一筆幣流圖快照（含佈局座標）。"""
-    pos_data = {"network": pos_network or {}, "maltego": pos_maltego or {}}
+                        pos_maltego: dict = None,
+                        edge_waypoints: dict = None) -> int:
+    """新增一筆幣流圖快照（含佈局座標、地址關係圖邊折點）。"""
+    pos_data = {"network": pos_network or {}, "maltego": pos_maltego or {},
+                "edge_waypoints": edge_waypoints or {}}
     with _conn() as con:
         cur = con.execute("""
             INSERT INTO graph_snapshots
@@ -974,9 +976,11 @@ def save_graph_snapshot(case_id: int, chain: str, nodes: list, edges: list,
 
 def update_graph_snapshot(snapshot_id: int, nodes: list, edges: list,
                            pos_network: dict = None, pos_maltego: dict = None,
+                           edge_waypoints: dict = None,
                            chain: str = None) -> None:
-    """覆蓋指定快照的節點、交易與佈局座標。"""
-    pos_data = {"network": pos_network or {}, "maltego": pos_maltego or {}}
+    """覆蓋指定快照的節點、交易、佈局座標與地址關係圖邊折點。"""
+    pos_data = {"network": pos_network or {}, "maltego": pos_maltego or {},
+                "edge_waypoints": edge_waypoints or {}}
     sets = ("nodes_json=?, edges_json=?, pos_json=?, "
             "saved_at=datetime('now','localtime')")
     vals: list = [
@@ -1006,6 +1010,7 @@ def get_graph_snapshots(case_id: int) -> list[dict]:
         pos = json.loads(d.pop("pos_json", "{}"))
         d["pos_network"] = pos.get("network", {})
         d["pos_maltego"] = pos.get("maltego", {})
+        d["edge_waypoints"] = pos.get("edge_waypoints", {})
         result.append(d)
     return result
 

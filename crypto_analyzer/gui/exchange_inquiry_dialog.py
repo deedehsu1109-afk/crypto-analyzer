@@ -17,6 +17,73 @@ from exporter.exchange_inquiry_builder import (
 )
 
 
+class _ScrollableDropdown(ctk.CTkToplevel):
+    """自訂下拉選單：項目依字母排序，固定顯示 visible_rows 筆，超出部分以
+    滑鼠滾輪上下捲動瀏覽選取。本身不含輸入框、也不搶焦點——搜尋文字由外部
+    觸發欄位（例如主表單的交易所名稱欄）打字時即時呼叫 set_filter() 篩選，
+    這樣輸入焦點全程留在主表單欄位上，點選清單項目才不會被 FocusOut 卡到。"""
+
+    def __init__(self, attach: ctk.CTkBaseClass, values: list[str],
+                 command, width: int = 220, visible_rows: int = 10,
+                 row_height: int = 30):
+        # 注意：master 刻意指向所在視窗（Toplevel），而非 attach 本身。
+        # CTkScrollableFrame 的滑鼠滾輪事件是用 bind_all 綁定、並沿著
+        # widget.master 逐層往上找自己的 canvas 來判斷要不要捲動；若 master
+        # 設為 attach（位在主對話框的 CTkScrollableFrame 內部），這條鏈會
+        # 一路往上連到主對話框的捲動區，導致在下拉選單內滾動滑鼠時，主對話框
+        # 也會跟著捲動。改用視窗本身當 master 可切斷這條鏈。
+        super().__init__(attach.winfo_toplevel())
+        self.overrideredirect(True)
+        self.attributes("-topmost", True)
+        self.configure(fg_color="#1b2338")
+        self._command = command
+        self._row_height = row_height
+        self._all_values = sorted(values, key=lambda s: s.lower())
+
+        x = attach.winfo_rootx()
+        y = attach.winfo_rooty() + attach.winfo_height() + 2
+        visible = max(1, min(visible_rows, len(self._all_values)))
+        height = visible * row_height + 10
+        self.geometry(f"{width}x{height}+{int(x)}+{int(y)}")
+
+        frame = ctk.CTkScrollableFrame(
+            self, fg_color="#1b2338", width=width - 20, height=height - 16,
+            scrollbar_button_color="#3b4766", scrollbar_button_hover_color="#4b5a86")
+        frame.pack(fill="both", expand=True, padx=2, pady=2)
+        self._frame = frame
+
+        self._buttons: dict[str, ctk.CTkButton] = {}
+        for v in self._all_values:
+            btn = ctk.CTkButton(
+                frame, text=v, anchor="w", corner_radius=4,
+                fg_color="transparent", hover_color="#2a3556",
+                text_color="#e2e8f0", font=("Microsoft JhengHei", 11),
+                height=row_height - 4,
+                command=lambda val=v: self._select(val),
+            )
+            btn.pack(fill="x", padx=2, pady=1)
+            self._buttons[v] = btn
+
+    def set_filter(self, query: str):
+        """依輸入的開頭字元（前綴、不分大小寫）即時篩選顯示項目——例如輸入第一個
+        字元「b」時，比對的也是各交易所名稱的第一個字元，只顯示 B 開頭的項目，
+        而不是名稱中任何位置含有 b 的項目"""
+        query = query.strip().lower()
+        for v in self._all_values:
+            self._buttons[v].pack_forget()
+        for v in self._all_values:
+            if v.lower().startswith(query):
+                self._buttons[v].pack(fill="x", padx=2, pady=1)
+
+    def has_match(self, query: str) -> bool:
+        query = query.strip().lower()
+        return any(v.lower().startswith(query) for v in self._all_values)
+
+    def _select(self, value: str):
+        self._command(value)
+        self.destroy()
+
+
 class ExchangeInquiryDialog(ctk.CTkToplevel):
     """交易所調閱申請書填表視窗"""
 
@@ -82,11 +149,18 @@ class ExchangeInquiryDialog(ctk.CTkToplevel):
 
         ex_row = self._field_row(scroll, row_idx, "交易所名稱")
         self._exchange_var = ctk.StringVar(value="OKX")
-        exchanges = list(KNOWN_EXCHANGES.keys())
-        ctk.CTkOptionMenu(ex_row, variable=self._exchange_var,
-                          values=exchanges, width=180,
-                          font=("Microsoft JhengHei", 11),
-                          command=self._on_exchange_change).pack(side="left", padx=(0, 10))
+        self._exchange_dropdown: _ScrollableDropdown | None = None
+        self._exchange_list = list(KNOWN_EXCHANGES.keys())
+        self._exchange_entry = ctk.CTkEntry(
+            ex_row, textvariable=self._exchange_var, width=180,
+            font=("Microsoft JhengHei", 11))
+        self._exchange_entry.pack(side="left", padx=(0, 4))
+        ctk.CTkLabel(ex_row, text="▾ 輸入即可搜尋", font=("Microsoft JhengHei", 10),
+                     text_color="#94a3b8").pack(side="left", padx=(0, 10))
+        self._exchange_entry.bind("<KeyRelease>", self._on_exchange_typed)
+        self._exchange_entry.bind("<Button-1>", self._on_exchange_entry_click)
+        self._exchange_entry.bind("<Escape>", lambda e: self._close_exchange_dropdown())
+        self._exchange_entry.bind("<FocusOut>", self._on_exchange_entry_focus_out)
         self._custom_exchange_entry = ctk.CTkEntry(
             ex_row, width=200, font=("Microsoft JhengHei", 11),
             placeholder_text="自訂名稱（選「其他」時填寫）")
@@ -547,6 +621,68 @@ class ExchangeInquiryDialog(ctk.CTkToplevel):
         email = KNOWN_EXCHANGES.get(value, "")
         self._recipient_email_entry.delete(0, "end")
         self._recipient_email_entry.insert(0, email)
+
+    # ── 交易所名稱：輸入即搜尋的自動完成欄位 ──────────────────────────────
+
+    _EXCHANGE_IGNORE_KEYS = {
+        "Escape", "Up", "Down", "Left", "Right", "Return", "KP_Enter",
+        "Tab", "Shift_L", "Shift_R", "Control_L", "Control_R",
+        "Alt_L", "Alt_R", "Caps_Lock",
+    }
+
+    def _open_exchange_dropdown(self):
+        if self._exchange_dropdown is not None and self._exchange_dropdown.winfo_exists():
+            return
+        self._exchange_dropdown = _ScrollableDropdown(
+            self._exchange_entry, self._exchange_list,
+            command=self._on_exchange_selected,
+            width=self._exchange_entry.winfo_width(), visible_rows=10)
+        self._exchange_dropdown.set_filter(self._exchange_var.get())
+        # 建立一個 topmost 的新視窗（下拉選單）在 Windows 上會把鍵盤焦點從
+        # 欄位搶走（即使選單本身從未呼叫 focus_set），導致選單開啟後打字/
+        # 刪除文字都沒有反應（使用者回報「OKX 無法刪除」正是這個原因）。
+        # 這裡在下一個事件循環把焦點搶回欄位，讓輸入不中斷。
+        self.after(10, self._reclaim_exchange_focus)
+
+    def _reclaim_exchange_focus(self):
+        if self._exchange_entry.winfo_exists():
+            self._exchange_entry.focus_set()
+
+    def _close_exchange_dropdown(self):
+        if self._exchange_dropdown is not None and self._exchange_dropdown.winfo_exists():
+            self._exchange_dropdown.destroy()
+        self._exchange_dropdown = None
+
+    def _on_exchange_entry_click(self, event=None):
+        # 點擊欄位時若選單尚未開啟，立即開啟並依目前文字篩選
+        self._open_exchange_dropdown()
+
+    def _on_exchange_typed(self, event=None):
+        if event is not None and event.keysym in self._EXCHANGE_IGNORE_KEYS:
+            return
+        self._open_exchange_dropdown()
+        self._exchange_dropdown.set_filter(self._exchange_var.get())
+
+    def _on_exchange_entry_focus_out(self, event=None):
+        # 開啟選單本身就會觸發一次欄位失焦（見 _open_exchange_dropdown 的說
+        # 明），所以這裡不能無條件關閉選單，而是延遲一小段時間後「重新檢查」
+        # 當時焦點是否已經回到欄位（代表只是選單開啟造成的暫時性失焦，應保持
+        # 選單開啟）；真正點擊選單外部或選取項目時，焦點不會回到欄位，屆時才
+        # 真正關閉。
+        self.after(150, self._maybe_close_exchange_dropdown)
+
+    def _maybe_close_exchange_dropdown(self):
+        focused = self.focus_get()
+        entry_inner = getattr(self._exchange_entry, "_entry", self._exchange_entry)
+        if focused is self._exchange_entry or focused is entry_inner:
+            return
+        self._close_exchange_dropdown()
+
+    def _on_exchange_selected(self, value: str):
+        self._exchange_var.set(value)
+        self._exchange_dropdown = None
+        self._on_exchange_change(value)
+        self._exchange_entry.focus_set()
 
     # ─────────────────────────────────────────────────────────────────────────
     # 手動新增錢包

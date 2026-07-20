@@ -407,19 +407,47 @@ def asn_for_ip(ip: str) -> str:
     return "UNKNOWN"
 
 
+def isp_for_ip(ip: str) -> str:
+    """透過 ip-api.com 查詢 IP 所屬業者（ISP／組織）資訊，格式例如
+    'Amazon.com, Inc. (AWS) · US'。查無資料時回傳 'UNKNOWN'。"""
+    try:
+        r = _get(f"http://ip-api.com/json/{ip}",
+                  params={"fields": "status,isp,org,country"}, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            if data.get("status") == "success":
+                isp = (data.get("isp") or "").strip()
+                org = (data.get("org") or "").strip()
+                country = (data.get("country") or "").strip()
+                label = isp or org or "UNKNOWN"
+                if org and org != isp:
+                    label = f"{label} ({org})"
+                if country:
+                    label = f"{label} · {country}"
+                return label
+    except Exception:
+        pass
+    return "UNKNOWN"
+
+
 def enrich_ip_list(ips: List[str], cf_ranges: List[str]) -> List[Dict]:
-    """為每個 IP 查詢 ASN 並標記是否為 Cloudflare，回傳分析結果清單。"""
+    """為每個 IP 查詢 ASN、業者資訊並標記是否為 Cloudflare，回傳分析結果清單。"""
     cf_ips = [ip for ip in ips if is_cf_ip(ip, cf_ranges)]
     non_cf = [ip for ip in ips if not is_cf_ip(ip, cf_ranges)]
 
     result: List[Dict] = []
     for ip in cf_ips:
-        result.append({"ip": ip, "asn": "AS13335 CLOUDFLARENET", "is_cf": True, "confidence": 95})
+        result.append({
+            "ip": ip, "asn": "AS13335 CLOUDFLARENET", "isp": "Cloudflare, Inc.",
+            "is_cf": True, "confidence": 95,
+        })
 
     def _enrich(ip: str) -> Dict:
         asn = asn_for_ip(ip)
+        isp = isp_for_ip(ip)
         by_asn = "AS13335" in asn.upper() or "CLOUDFLARE" in asn.upper()
-        return {"ip": ip, "asn": asn, "is_cf": by_asn, "confidence": 60 if by_asn else 90}
+        return {"ip": ip, "asn": asn, "isp": isp, "is_cf": by_asn,
+                "confidence": 60 if by_asn else 90}
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
         fmap = {ex.submit(_enrich, ip): ip for ip in non_cf}
@@ -428,9 +456,186 @@ def enrich_ip_list(ips: List[str], cf_ranges: List[str]) -> List[Dict]:
             try:
                 result.append(fut.result())
             except Exception:
-                result.append({"ip": ip, "asn": "UNKNOWN", "is_cf": False, "confidence": 0})
+                result.append({"ip": ip, "asn": "UNKNOWN", "isp": "UNKNOWN",
+                                "is_cf": False, "confidence": 0})
 
     return result
+
+
+# ── Phase 5：主動頁面偵察 ────────────────────────────────────────────────────
+
+_PAGE_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
+_SKIP_TLDS = {
+    'cloudflare.com', 'fastly.com', 'akamaized.net', 'akamai.com',
+    'google.com', 'gstatic.com', 'googleapis.com', 'googletagmanager.com',
+    'facebook.com', 'fbcdn.net', 'twitter.com', 'twimg.com',
+    'youtube.com', 'ytimg.com', 'doubleclick.net', 'googlesyndication.com',
+    'amazon.com', 'amazonaws.com', 'cloudfront.net',
+    'jquery.com', 'jsdelivr.net', 'bootstrapcdn.com', 'unpkg.com',
+}
+_MACCMS_PLAY_IDS: List[int] = [1, 2, 3, 5, 10, 20, 21, 100, 500]
+
+
+def _skip_domain(d: str) -> bool:
+    d = d.lower()
+    return any(d == s or d.endswith('.' + s) for s in _SKIP_TLDS)
+
+
+def _extract_domains_from_text(text: str, base_domain: str) -> Set[str]:
+    """從 HTML / JSON / JS 文字提取所有外部域名參照。"""
+    found: Set[str] = set()
+    # 匹配 https?:// 後方或引號內的域名
+    pat = re.compile(
+        r'(?:https?://|["\'\x60])([a-zA-Z0-9][a-zA-Z0-9._-]{1,253}'
+        r'\.[a-zA-Z]{2,}(?:/[^\s"\'<>\x60]*)?)'
+    )
+    for m in pat.finditer(text):
+        raw = m.group(1).split('/')[0].lower().rstrip('.')
+        if (raw
+                and raw != base_domain
+                and not raw.endswith('.' + base_domain)
+                and not _skip_domain(raw)
+                and '.' in raw
+                and not re.match(r'^\d+\.\d+', raw)):
+            found.add(raw)
+    return found
+
+
+def _fetch_and_extract(domain: str, cb: ProgressCB) -> tuple[List[str], str]:
+    """
+    Phase 5 — 主動抓取目標首頁及 CMS 播放頁，提取所有外部域名參照。
+    自動偵測 CMS（MacCMS / WordPress / Joomla / Drupal）並進行針對性深層追蹤。
+    回傳 (排序後外部域名清單, CMS名稱)。
+    """
+    ext: Set[str] = set()
+    cms = ''
+    hdrs = {
+        'User-Agent':      _PAGE_UA,
+        'Accept':          'text/html,application/xhtml+xml,*/*;q=0.8',
+        'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8',
+        'DNT':             '1',
+    }
+
+    # ── 首頁 ──────────────────────────────────────────────────────────────
+    for scheme in ('https', 'http'):
+        try:
+            r = requests.get(
+                f'{scheme}://{domain}/', headers=hdrs,
+                timeout=12, allow_redirects=True, stream=True,
+            )
+            body = b''
+            for chunk in r.iter_content(8192):
+                body += chunk
+                if len(body) > 512 * 1024:
+                    break
+            r.close()
+            html = body.decode('utf-8', errors='ignore')
+
+            # CMS 偵測
+            if 'player_data' in html or (
+                    '/template/' in html and re.search(r'maccms|MacCMS', html)):
+                cms = 'MacCMS'
+            elif 'player_data' in html:
+                cms = 'MacCMS'
+            elif 'wp-content' in html or 'wp-includes' in html:
+                cms = 'WordPress'
+            elif 'joomla' in html.lower():
+                cms = 'Joomla'
+            elif 'drupal' in html.lower():
+                cms = 'Drupal'
+
+            new = _extract_domains_from_text(html, domain)
+            ext.update(new)
+            if cb:
+                cb("Phase5",
+                   f"[首頁 {scheme}] HTTP {r.status_code}"
+                   f" | 外部域名 {len(new)} 個 | CMS: {cms or '未知'}")
+            break
+        except Exception as e:
+            if cb:
+                cb("Phase5", f"[首頁 {scheme}] 連線失敗：{e}")
+
+    # ── MacCMS 播放頁追蹤 ───────────────────────────────────────────────
+    if 'MacCMS' in cms:
+        if cb:
+            cb("Phase5", "[MacCMS] 追蹤影片播放頁 player_data 中的影片 CDN 來源…")
+        found_player = False
+        for vid_id in _MACCMS_PLAY_IDS:
+            if found_player:
+                break
+            for play_path in (
+                f'/play/{vid_id}-1-1.html',
+                f'/vodplay/{vid_id}-1-1.html',
+            ):
+                try:
+                    import json as _json
+                    r = requests.get(
+                        f'https://{domain}{play_path}',
+                        headers={**hdrs, 'Referer': f'https://{domain}/'},
+                        timeout=10, allow_redirects=True,
+                    )
+                    if r.status_code != 200:
+                        continue
+                    m = re.search(
+                        r'var\s+player_data\s*=\s*(\{[^<]{10,3000}\})',
+                        r.text,
+                    )
+                    if not m:
+                        continue
+                    pd = _json.loads(m.group(1))
+                    url_str = pd.get('url', '')
+                    frm     = pd.get('from', '')
+                    if url_str:
+                        new = _extract_domains_from_text(url_str, domain)
+                        ext.update(new)
+                        if cb:
+                            cb("Phase5",
+                               f"[MacCMS] ID={vid_id} from={frm}"
+                               f" → CDN 域名：{', '.join(new) or '（無新域名）'}")
+                        found_player = bool(new)
+                        if found_player:
+                            break
+                except Exception:
+                    pass
+
+    result = sorted(d for d in ext if not re.match(r'^\d+\.\d+\.\d+\.\d+$', d))
+    return result, cms
+
+
+# ── Phase 6：SSL 憑證比對 ─────────────────────────────────────────────────────
+
+def _probe_ssl_match(ip: str, domain: str, timeout: int = 6) -> bool:
+    """
+    對候選 IP 發起 TLS 連線（SNI = domain），在 DER 二進位憑證中
+    搜尋目標域名字串，確認該 IP 是否持有目標域名 SSL 憑證。
+    （不驗證憑證有效性，僅比對 CN / SAN 文字內容。）
+    """
+    import ssl
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    try:
+        with socket.create_connection((ip, 443), timeout=timeout) as raw:
+            with ctx.wrap_socket(raw, server_hostname=domain) as tls:
+                cert_bin = tls.getpeercert(binary_form=True)
+                if not cert_bin:
+                    return False
+                # ASN.1 DER 中 ASCII 域名以原始 bytes 儲存，直接子字串搜尋
+                if domain.lower().encode('ascii') in cert_bin:
+                    return True
+                # 萬用字元憑證：*.example.com
+                parts = domain.split('.')
+                if len(parts) > 2:
+                    wildcard = ('.' + '.'.join(parts[1:])).encode('ascii')
+                    if wildcard in cert_bin:
+                        return True
+    except Exception:
+        pass
+    return False
 
 
 # ── 主掃描函式 ────────────────────────────────────────────────────────────────
@@ -522,12 +727,53 @@ def scan_domain(
             non_cf_sub = sum(1 for h in subdomain_hits if not h["behind_cloudflare"])
             _p("Phase3", f"解析完成：{len(subdomain_hits)} 筆，其中 {non_cf_sub} 個非 CF IP")
 
-    # ── Phase 4：IP 分析 & ASN 查詢 ──────────────────────────────────────────
-    _p("Phase4", f"分析 {len(all_candidate)} 個候選 IP（ASN 查詢中）…")
+    # ── Phase 4：主動頁面偵察 ────────────────────────────────────────────────
+    _p("Phase4", "正在抓取目標頁面提取外部 CDN 域名參照…")
+    page_domains_list, cms_detected = _fetch_and_extract(target, _p)
+    _p("Phase4",
+       f"發現 {len(page_domains_list)} 個外部域名"
+       f"（CMS：{cms_detected or '未知'}）")
+    page_hits: List[Dict] = []
+    if page_domains_list:
+        page_resolved = resolve_bulk(page_domains_list, max_workers=threads)
+        for host, ip in page_resolved.items():
+            if ip is None:
+                continue
+            behind_cf = is_cf_ip(ip, cf_ranges)
+            all_candidate.add(ip)
+            page_hits.append({
+                "host":             host,
+                "ip":               ip,
+                "behind_cloudflare": behind_cf,
+                "source":           "page",
+            })
+        page_hits.sort(key=lambda h: h["behind_cloudflare"])
+        non_cf_page = sum(1 for h in page_hits if not h["behind_cloudflare"])
+        _p("Phase4",
+           f"頁面參照解析：{len(page_hits)} 筆，{non_cf_page} 個非 CF")
+
+    # ── Phase 5：IP 分析 & ASN 查詢 ──────────────────────────────────────────
+    _p("Phase5", f"分析 {len(all_candidate)} 個候選 IP（ASN 查詢中）…")
     enriched = enrich_ip_list(list(all_candidate), cf_ranges)
     non_cf_ips = [e for e in enriched if not e["is_cf"]]
     non_cf_ips.sort(key=lambda x: x["confidence"], reverse=True)
-    _p("Phase4", f"分析完成：找到 {len(non_cf_ips)} 個非 Cloudflare 候選 IP")
+    _p("Phase5", f"分析完成：找到 {len(non_cf_ips)} 個非 Cloudflare 候選 IP")
+
+    # ── Phase 6：SSL 憑證確認 ─────────────────────────────────────────────────
+    ssl_confirmed: List[str] = []
+    if non_cf_ips:
+        _p("Phase6", f"SSL 憑證比對（最多 8 個非 CF IP）…")
+        for entry in non_cf_ips[:8]:
+            ip = entry["ip"]
+            matched = _probe_ssl_match(ip, target)
+            entry["ssl_confirmed"] = matched
+            if matched:
+                ssl_confirmed.append(ip)
+                _p("Phase6", f"✔ SSL 匹配：{ip}（持有 {target} 憑證）")
+        if ssl_confirmed:
+            _p("Phase6", f"共 {len(ssl_confirmed)} 個 IP 通過 SSL 憑證比對")
+        else:
+            _p("Phase6", "無 IP 通過 SSL 比對（CF 後端可能使用 CF 通用憑證）")
 
     return {
         "target":           target,
@@ -539,4 +785,6 @@ def scan_domain(
         "subdomain_hits":   subdomain_hits,
         "non_cf_ips":       non_cf_ips,
         "has_wildcard":     has_wildcard,
+        "page_hits":        page_hits,
+        "cms_detected":     cms_detected,
     }

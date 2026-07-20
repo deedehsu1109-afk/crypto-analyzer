@@ -11,6 +11,7 @@ matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import matplotlib.transforms as mtransforms
+from matplotlib.path import Path
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 import networkx as nx
 
@@ -61,6 +62,7 @@ class FlowGraphPanel(ctk.CTkFrame):
         self._mpl_canvas: FigureCanvasTkAgg | None = None
         self._pos_network: dict = {}   # 地址關係圖佈局快取（spring layout）
         self._pos_maltego: dict = {}   # 司法金流圖佈局快取（BFS 階層）
+        self._edge_waypoints: dict = {}   # 地址關係圖邊折點 {(from,to): [(x,y), ...]}
         self._selected_node:  str | None = None
         # 拖曳 / 複選狀態
         self._selected_nodes: set       = set()
@@ -68,6 +70,11 @@ class FlowGraphPanel(ctk.CTkFrame):
         self._drag_press_xy:  tuple | None = None  # 拖曳起點（資料座標）
         self._drag_start_pos: dict       = {}       # 拖曳起點時 _pos 的快照
         self._is_dragging:    bool       = False
+        # 折點拖曳狀態
+        self._drag_waypoint:       tuple | None = None  # (edge_key, wp_index)
+        self._drag_waypoint_press: bool = False
+        # 每次繪製後重建，供點擊命中測試用：[(edge_key, wp_index, (x,y)), ...]
+        self._wp_hit_list: list = []
 
         self._build_ui()
 
@@ -90,6 +97,7 @@ class FlowGraphPanel(ctk.CTkFrame):
         self._update_mode_label()
         self._pos_network = {}
         self._pos_maltego = {}
+        self._edge_waypoints = {}
         self._render()
 
     def load_from_case(self, case_id: int, chain: str = None):
@@ -109,6 +117,8 @@ class FlowGraphPanel(ctk.CTkFrame):
                                  for k, v in snap.get("pos_network", {}).items()}
             self._pos_maltego = {k: tuple(v)
                                  for k, v in snap.get("pos_maltego", {}).items()}
+            self._edge_waypoints = self._deserialize_edge_waypoints(
+                snap.get("edge_waypoints", {}))
         else:
             # ── 無快照：從交易記錄重建（不限鏈別，chain=None 全部取出）────────
             rows = _db.get_edges_for_graph(case_id=case_id, chain=chain)
@@ -124,6 +134,7 @@ class FlowGraphPanel(ctk.CTkFrame):
                     self._state.nodes[addr].custom_label = w.get("label", "")
             self._pos_network = {}
             self._pos_maltego = {}
+            self._edge_waypoints = {}
 
         # ── 涉案地址標記（每次都從 DB 取最新值，不依賴快照內容）────────────
         for ca in _db.get_case_addresses(case_id):
@@ -291,12 +302,16 @@ class FlowGraphPanel(ctk.CTkFrame):
         self._state = None
         self._pos_network = {}
         self._pos_maltego = {}
+        self._edge_waypoints = {}
         self._selected_node  = None
         self._selected_nodes = set()
         self._drag_node      = None
         self._drag_press_xy  = None
         self._drag_start_pos = {}
         self._is_dragging    = False
+        self._drag_waypoint       = None
+        self._drag_waypoint_press = False
+        self._wp_hit_list = []
         if self._ax:
             self._ax.clear()
             self._ax.set_facecolor(BG_DARK)
@@ -595,11 +610,25 @@ class FlowGraphPanel(ctk.CTkFrame):
                         zorder=4,
                     )
 
-        nx.draw_networkx_edges(G, self._pos_network, ax=self._ax,
-                               edge_color="#4a6fa5", arrows=True,
-                               arrowsize=15, width=edge_widths,
-                               connectionstyle="arc3,rad=0.1",
-                               min_source_margin=18, min_target_margin=18)
+        # 邊：直線（可能經過使用者新增的折點），取代原本固定弧度的 nx.draw_networkx_edges
+        self._wp_hit_list = []
+        for (u, v, d), lw in zip(G.edges(data=True), edge_widths):
+            if u not in self._pos_network or v not in self._pos_network:
+                continue
+            key = (u, v)
+            wpts = self._edge_waypoints.get(key, [])
+            verts = [self._pos_network[u], *wpts, self._pos_network[v]]
+            arrow = mpatches.FancyArrowPatch(
+                path=Path(verts), arrowstyle="-|>", mutation_scale=15,
+                color="#4a6fa5", linewidth=lw,
+                shrinkA=18, shrinkB=18, zorder=1,
+            )
+            self._ax.add_patch(arrow)
+            for i, (wx, wy) in enumerate(wpts):
+                self._ax.plot(wx, wy, marker="D", markersize=5,
+                              color="#f5a623", markeredgecolor="#1a1a2e",
+                              markeredgewidth=0.8, zorder=2)
+                self._wp_hit_list.append((key, i, (wx, wy)))
 
         # 邊標籤：每筆交易固定2行（時間＋數量＋幣種 / tx hash），固定像素間距
         _EL_H   = 11   # 每行高度（points，不隨縮放改變）
@@ -616,9 +645,10 @@ class FlowGraphPanel(ctk.CTkFrame):
         for (_eu, _ev), _txs in _edge_grp.items():
             if _eu not in self._pos_network or _ev not in self._pos_network:
                 continue
-            # 邊中點（幾何中點，與 arc3 曲線足夠接近）
-            _mx = (self._pos_network[_eu][0] + self._pos_network[_ev][0]) / 2
-            _my = (self._pos_network[_eu][1] + self._pos_network[_ev][1]) / 2
+            # 邊中點：沿折線路徑（含折點）以弧長置中，而非單純頭尾幾何中點
+            _mx, _my = self._polyline_midpoint(
+                [self._pos_network[_eu], *self._edge_waypoints.get((_eu, _ev), []),
+                 self._pos_network[_ev]])
 
             _show  = _txs[:_EL_MAX]
             _extra = len(_txs) - len(_show)
@@ -891,6 +921,97 @@ class FlowGraphPanel(ctk.CTkFrame):
                 best = node
         return best, best_d
 
+    @staticmethod
+    def _polyline_midpoint(verts: list) -> tuple:
+        """回傳沿多段折線（依弧長）置中的座標點。"""
+        if len(verts) == 1:
+            return verts[0]
+        seg_lens = [
+            ((verts[i + 1][0] - verts[i][0]) ** 2
+             + (verts[i + 1][1] - verts[i][1]) ** 2) ** 0.5
+            for i in range(len(verts) - 1)
+        ]
+        total = sum(seg_lens)
+        if total == 0:
+            return verts[0]
+        target = total / 2.0
+        acc = 0.0
+        for i, seg_len in enumerate(seg_lens):
+            if acc + seg_len >= target or i == len(seg_lens) - 1:
+                t = 0.0 if seg_len == 0 else (target - acc) / seg_len
+                x0, y0 = verts[i]
+                x1, y1 = verts[i + 1]
+                return (x0 + (x1 - x0) * t, y0 + (y1 - y0) * t)
+            acc += seg_len
+        return verts[-1]
+
+    def _find_nearest_waypoint(self, x, y):
+        """回傳 (edge_key, wp_index, 距離平方)；無折點時回傳 (None, None, inf)。"""
+        if x is None or y is None or not self._wp_hit_list:
+            return None, None, float("inf")
+        best_key, best_idx, best_d = None, None, float("inf")
+        for key, idx, (wx, wy) in self._wp_hit_list:
+            d = (wx - x) ** 2 + (wy - y) ** 2
+            if d < best_d:
+                best_d = d
+                best_key, best_idx = key, idx
+        return best_key, best_idx, best_d
+
+    def _find_edge_insert_point(self, x, y):
+        """在所有邊的折線段中，找出離 (x,y) 最近的線段。
+        回傳 (edge_key, 插入位置索引, 距離平方)；找不到時回傳 (None, None, inf)。"""
+        if x is None or y is None or self._state is None:
+            return None, None, float("inf")
+        best_key, best_idx, best_d = None, None, float("inf")
+        seen = set()
+        for _ei in self._state.edges:
+            key = (_ei.source, _ei.target)
+            if key in seen:
+                continue
+            seen.add(key)
+            u, v = key
+            if u not in self._pos_network or v not in self._pos_network:
+                continue
+            verts = [self._pos_network[u], *self._edge_waypoints.get(key, []),
+                     self._pos_network[v]]
+            for i in range(len(verts) - 1):
+                d = self._point_segment_dist_sq((x, y), verts[i], verts[i + 1])
+                if d < best_d:
+                    best_d = d
+                    best_key, best_idx = key, i
+        return best_key, best_idx, best_d
+
+    @staticmethod
+    def _serialize_edge_waypoints(edge_waypoints: dict) -> dict:
+        """{(from,to): [(x,y),...]} → {"from→to": [[x,y],...]}（JSON 物件鍵須為字串）。"""
+        return {f"{u}→{v}": [list(map(float, p)) for p in pts]
+                for (u, v), pts in edge_waypoints.items()}
+
+    @staticmethod
+    def _deserialize_edge_waypoints(data: dict) -> dict:
+        """{"from→to": [[x,y],...]} → {(from,to): [(x,y),...]}。"""
+        result = {}
+        for k, v in (data or {}).items():
+            parts = k.split("→")
+            if len(parts) != 2:
+                continue
+            result[(parts[0], parts[1])] = [tuple(p) for p in v]
+        return result
+
+    @staticmethod
+    def _point_segment_dist_sq(p, a, b) -> float:
+        """點 p 到線段 a-b 的最短距離平方。"""
+        px, py = p
+        ax, ay = a
+        bx, by = b
+        dx, dy = bx - ax, by - ay
+        if dx == 0 and dy == 0:
+            return (px - ax) ** 2 + (py - ay) ** 2
+        t = ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)
+        t = max(0.0, min(1.0, t))
+        cx, cy = ax + t * dx, ay + t * dy
+        return (px - cx) ** 2 + (py - cy) ** 2
+
     # ── 滑鼠事件 ─────────────────────────────────────────────────────────────
 
     def _node_click_thresh(self) -> float:
@@ -909,10 +1030,22 @@ class FlowGraphPanel(ctk.CTkFrame):
         nearest, dist = self._find_nearest_node(event.xdata, event.ydata)
         on_node = nearest is not None and dist < self._node_click_thresh()
 
-        # 右鍵：選單
+        wp_key, wp_idx, wp_dist = self._find_nearest_waypoint(event.xdata, event.ydata)
+        on_waypoint = (not on_node and wp_key is not None
+                       and wp_dist < self._node_click_thresh())
+
+        # 右鍵：選單（節點 > 折點 > 邊線新增折點）
         if event.button == 3:
             if on_node:
                 self._show_node_menu(nearest)
+            elif on_waypoint:
+                self._show_waypoint_menu(wp_key, wp_idx)
+            else:
+                edge_key, insert_idx, edge_dist = self._find_edge_insert_point(
+                    event.xdata, event.ydata)
+                if edge_key is not None and edge_dist < self._node_click_thresh():
+                    self._show_add_waypoint_menu(
+                        edge_key, insert_idx, (event.xdata, event.ydata))
             return
 
         if event.button != 1:
@@ -945,6 +1078,10 @@ class FlowGraphPanel(ctk.CTkFrame):
             self._drag_start_pos = {k: (v[0], v[1]) for k, v in self._pos_network.items()}
             self._is_dragging    = False
             self._draw_network_fast()   # 立即顯示選取高亮
+        elif on_waypoint:
+            # 準備拖曳折點（單點拖曳，直接以滑鼠座標更新，不需 delta 運算）
+            self._drag_waypoint       = (wp_key, wp_idx)
+            self._drag_waypoint_press = False
         else:
             # 點擊空白區域：取消選取
             if not shift:
@@ -956,7 +1093,17 @@ class FlowGraphPanel(ctk.CTkFrame):
             self._draw_network_fast()
 
     def _on_mouse_motion(self, event):
-        """拖曳移動：更新節點座標並快速重繪。"""
+        """拖曳移動：更新節點/折點座標並快速重繪。"""
+        if (self._drag_waypoint is not None and event.inaxes == self._ax
+                and event.xdata is not None and event.ydata is not None):
+            self._drag_waypoint_press = True
+            key, idx = self._drag_waypoint
+            wpts = self._edge_waypoints.get(key)
+            if wpts and 0 <= idx < len(wpts):
+                wpts[idx] = (event.xdata, event.ydata)
+                self._draw_network_fast()
+            return
+
         if (self._drag_node is None or event.inaxes != self._ax
                 or event.xdata is None or event.ydata is None):
             return
@@ -984,11 +1131,15 @@ class FlowGraphPanel(ctk.CTkFrame):
     def _on_mouse_release(self, event):
         """任意按鍵放開：清除拖曳狀態；左鍵拖曳結束時完整重繪並保留視圖。"""
         was_left_drag = (event.button == 1 and self._is_dragging)
+        was_wp_drag   = (event.button == 1 and self._drag_waypoint is not None
+                         and self._drag_waypoint_press)
         self._drag_node      = None
         self._drag_press_xy  = None
         self._drag_start_pos = {}
         self._is_dragging    = False
-        if was_left_drag:
+        self._drag_waypoint       = None
+        self._drag_waypoint_press = False
+        if was_left_drag or was_wp_drag:
             self._render(preserve_view=True)
 
     def _draw_network_fast(self):
@@ -1074,6 +1225,46 @@ class FlowGraphPanel(ctk.CTkFrame):
         finally:
             menu.grab_release()
 
+    def _show_add_waypoint_menu(self, edge_key: tuple, insert_idx: int, xy: tuple):
+        """在連接線上按右鍵：提供「新增折點」選單。"""
+        menu = tk.Menu(self, tearoff=0, bg="#2a2a3e", fg=TEXT_COL,
+                       activebackground="#3a3a5e", activeforeground="white",
+                       font=("Microsoft JhengHei", 10))
+        menu.add_command(
+            label="➕ 在此新增折點",
+            command=lambda: self._add_waypoint(edge_key, insert_idx, xy))
+        try:
+            px, py = self.winfo_pointerxy()
+            menu.tk_popup(px, py)
+        finally:
+            menu.grab_release()
+
+    def _add_waypoint(self, edge_key: tuple, insert_idx: int, xy: tuple):
+        self._edge_waypoints.setdefault(edge_key, []).insert(insert_idx, xy)
+        self._render(preserve_view=True)
+
+    def _show_waypoint_menu(self, edge_key: tuple, wp_idx: int):
+        """在既有折點上按右鍵：提供「刪除折點」選單。"""
+        menu = tk.Menu(self, tearoff=0, bg="#2a2a3e", fg=TEXT_COL,
+                       activebackground="#3a3a5e", activeforeground="white",
+                       font=("Microsoft JhengHei", 10))
+        menu.add_command(
+            label="🗑 刪除此折點",
+            command=lambda: self._delete_waypoint(edge_key, wp_idx))
+        try:
+            px, py = self.winfo_pointerxy()
+            menu.tk_popup(px, py)
+        finally:
+            menu.grab_release()
+
+    def _delete_waypoint(self, edge_key: tuple, wp_idx: int):
+        wpts = self._edge_waypoints.get(edge_key)
+        if wpts and 0 <= wp_idx < len(wpts):
+            wpts.pop(wp_idx)
+            if not wpts:
+                del self._edge_waypoints[edge_key]
+            self._render(preserve_view=True)
+
     def _open_case_address_dialog(self, address: str, row: dict | None):
         """開啟涉案地址對話框（編輯或新增），儲存後同步更新圖上的節點標記。"""
         from database import db as _db
@@ -1124,6 +1315,7 @@ class FlowGraphPanel(ctk.CTkFrame):
     def _relayout(self):
         self._pos_network = {}
         self._pos_maltego = {}
+        self._edge_waypoints = {}
         self._render()
 
     def _find_path_dialog(self):
@@ -1207,18 +1399,19 @@ class FlowGraphPanel(ctk.CTkFrame):
         _, edges = self._state.to_snapshot()
         pos_net = {k: list(map(float, v)) for k, v in self._pos_network.items()}
         pos_mal = {k: list(map(float, v)) for k, v in self._pos_maltego.items()}
+        edge_wp = self._serialize_edge_waypoints(self._edge_waypoints)
 
         existing = _db.get_graph_snapshots(case_id)
         if existing:
             _db.update_graph_snapshot(
                 existing[0]["id"], nodes, edges,
-                pos_network=pos_net, pos_maltego=pos_mal,
+                pos_network=pos_net, pos_maltego=pos_mal, edge_waypoints=edge_wp,
                 chain=self._state.chain,
             )
         else:
             _db.save_graph_snapshot(
                 case_id, self._state.chain, nodes, edges,
-                pos_network=pos_net, pos_maltego=pos_mal,
+                pos_network=pos_net, pos_maltego=pos_mal, edge_waypoints=edge_wp,
             )
         messagebox.showinfo("已儲存", "幣流圖已更新至案件資料。", parent=self)
 
@@ -1227,13 +1420,18 @@ class FlowGraphPanel(ctk.CTkFrame):
             parent=self,
             title="匯出幣流圖",
             defaultextension=".png",
-            filetypes=[("PNG 圖片", "*.png"), ("SVG 向量圖", "*.svg"),
-                       ("所有檔案", "*.*")])
+            filetypes=[("PNG 圖片", "*.png"), ("PDF 文件", "*.pdf"),
+                       ("SVG 向量圖", "*.svg"), ("所有檔案", "*.*")])
         if not path:
             return
         try:
-            self._fig.savefig(path, dpi=150, bbox_inches="tight",
-                              facecolor=BG_DARK)
+            is_pdf = path.lower().endswith(".pdf")
+            self._fig.savefig(
+                path,
+                dpi=150,
+                bbox_inches="tight",
+                facecolor="white" if is_pdf else BG_DARK,
+            )
             messagebox.showinfo("匯出完成", f"圖片已儲存至：\n{path}", parent=self)
         except Exception as e:
             messagebox.showerror("匯出失敗", str(e), parent=self)
@@ -1271,6 +1469,7 @@ class FlowGraphPanel(ctk.CTkFrame):
                             for k, v in self._pos_network.items()},
             "pos_maltego": {k: list(map(float, v))
                             for k, v in self._pos_maltego.items()},
+            "edge_waypoints": self._serialize_edge_waypoints(self._edge_waypoints),
         }
         try:
             with open(path, "w", encoding="utf-8") as f:
@@ -1305,6 +1504,8 @@ class FlowGraphPanel(ctk.CTkFrame):
                              for k, v in data.get("pos_network", {}).items()}
         self._pos_maltego = {k: tuple(v)
                              for k, v in data.get("pos_maltego", {}).items()}
+        self._edge_waypoints = self._deserialize_edge_waypoints(
+            data.get("edge_waypoints", {}))
         self._gen_mode.set(mode)
         self._update_mode_label()
         self._render()
@@ -1564,6 +1765,7 @@ class FlowGraphPanel(ctk.CTkFrame):
                 self._update_mode_label()
                 self._pos_network = {}
                 self._pos_maltego = {}
+                self._edge_waypoints = {}
             node = self._state.add_node(addr, role=role_var.get(),
                                         custom_label=e_label.get().strip())
             self._view_mode.set(VIEW_MALTEGO)
@@ -1783,6 +1985,7 @@ class FlowGraphPanel(ctk.CTkFrame):
         if was_fresh:
             self._pos_network = {}
             self._pos_maltego = {}
+            self._edge_waypoints = {}
         self._view_mode.set(VIEW_MALTEGO)
         self._render()
 

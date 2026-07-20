@@ -153,16 +153,18 @@ class CloudFailPanel(ctk.CTkFrame):
             font=("標楷體", 13, "bold"),
         ).grid(row=0, column=0, sticky="w", pady=(0, 4))
 
-        cols_ip = ("ip", "asn", "confidence")
+        cols_ip = ("ip", "asn", "isp", "confidence")
         self._ip_tree = ttk.Treeview(
             left, columns=cols_ip, show="headings", height=8,
             selectmode="browse",
         )
         self._ip_tree.heading("ip",         text="IP 位址")
         self._ip_tree.heading("asn",        text="ASN 資訊")
+        self._ip_tree.heading("isp",        text="IP 業者")
         self._ip_tree.heading("confidence", text="信心度 (%)")
-        self._ip_tree.column("ip",         width=160, anchor="w")
-        self._ip_tree.column("asn",        width=220, anchor="w")
+        self._ip_tree.column("ip",         width=140, anchor="w")
+        self._ip_tree.column("asn",        width=180, anchor="w")
+        self._ip_tree.column("isp",        width=200, anchor="w")
         self._ip_tree.column("confidence", width=90,  anchor="center")
         self._ip_tree.grid(row=1, column=0, sticky="nsew")
 
@@ -180,19 +182,21 @@ class CloudFailPanel(ctk.CTkFrame):
         right.rowconfigure(1, weight=1)
 
         ctk.CTkLabel(
-            right, text="■  子網域解析（非 Cloudflare）",
+            right, text="■  域名解析（子網域 + 頁面參照）",
             font=("標楷體", 13, "bold"),
         ).grid(row=0, column=0, sticky="w", pady=(0, 4))
 
-        cols_sub = ("host", "ip")
+        cols_sub = ("host", "ip", "source")
         self._sub_tree = ttk.Treeview(
             right, columns=cols_sub, show="headings", height=8,
             selectmode="browse",
         )
-        self._sub_tree.heading("host", text="子網域")
-        self._sub_tree.heading("ip",   text="解析 IP")
-        self._sub_tree.column("host", width=260, anchor="w")
-        self._sub_tree.column("ip",   width=150, anchor="w")
+        self._sub_tree.heading("host",   text="域名")
+        self._sub_tree.heading("ip",     text="解析 IP")
+        self._sub_tree.heading("source", text="來源")
+        self._sub_tree.column("host",   width=210, anchor="w")
+        self._sub_tree.column("ip",     width=140, anchor="w")
+        self._sub_tree.column("source", width=70,  anchor="center")
         self._sub_tree.grid(row=1, column=0, sticky="nsew")
 
         sub_sb = ttk.Scrollbar(right, orient="vertical", command=self._sub_tree.yview)
@@ -229,7 +233,15 @@ class CloudFailPanel(ctk.CTkFrame):
             fg_color="#555", hover_color="#444",
             command=self._export_json,
         )
-        self._export_btn.pack(side="left")
+        self._export_btn.pack(side="left", padx=(0, 8))
+
+        self._pdf_btn = ctk.CTkButton(
+            bar, text="📄  匯出 PDF 報告",
+            font=("標楷體", 13), width=140, state="disabled",
+            fg_color="#1a4a8c", hover_color="#133570",
+            command=self._export_pdf,
+        )
+        self._pdf_btn.pack(side="left")
 
         self._status_lbl = ctk.CTkLabel(
             bar, text="", font=("標楷體", 12), text_color="#888"
@@ -240,8 +252,11 @@ class CloudFailPanel(ctk.CTkFrame):
 
     def _log(self, phase: str, msg: str) -> None:
         """在進度日誌中追加一行，必須在主執行緒呼叫（或透過 after）。"""
-        tag = {"Phase1": "[初始化]", "Phase2": "[偵察]",
-               "Phase3": "[解析]", "Phase4": "[分析]"}.get(phase, f"[{phase}]")
+        tag = {
+            "Phase1": "[初始化]", "Phase2": "[偵察]",
+            "Phase3": "[解析]",   "Phase4": "[頁面]",
+            "Phase5": "[分析]",   "Phase6": "[SSL]",
+        }.get(phase, f"[{phase}]")
         line = f"{tag} {msg}\n"
         self._log_box.configure(state="normal")
         self._log_box.insert("end", line)
@@ -289,6 +304,7 @@ class CloudFailPanel(ctk.CTkFrame):
         self._add_selected_btn.configure(state="disabled")
         self._add_all_btn.configure(state="disabled")
         self._export_btn.configure(state="disabled")
+        self._pdf_btn.configure(state="disabled")
         self._status_lbl.configure(text="掃描進行中…")
 
         self._log("Phase1", f"目標：{domain}｜{"僅被動" if passive_only else "完整"}模式｜執行緒：{threads}")
@@ -334,12 +350,15 @@ class CloudFailPanel(ctk.CTkFrame):
         self._populate_tables(result)
 
         non_cf_count = len(result.get("non_cf_ips", []))
+        cms = result.get("cms_detected", "")
+        cms_tag = f"｜CMS：{cms}" if cms else ""
         self._status_lbl.configure(
-            text=f"完成｜找到 {non_cf_count} 個非 CF IP"
+            text=f"完成｜找到 {non_cf_count} 個非 CF IP{cms_tag}"
         )
         if result.get("non_cf_ips"):
             self._add_all_btn.configure(state="normal")
         self._export_btn.configure(state="normal")
+        self._pdf_btn.configure(state="normal")
 
     # ── 表格填充 ──────────────────────────────────────────────────────────────
 
@@ -353,17 +372,34 @@ class CloudFailPanel(ctk.CTkFrame):
         self._clear_tables()
 
         for entry in result.get("non_cf_ips", []):
+            ssl_ok = entry.get("ssl_confirmed")
+            conf = entry.get("confidence", "")
+            if ssl_ok is True:
+                conf_display = f"{conf} ✔SSL"
+            elif ssl_ok is False:
+                conf_display = str(conf)
+            else:
+                conf_display = str(conf)
             self._ip_tree.insert(
                 "", "end",
                 iid=entry["ip"],
-                values=(entry["ip"], entry.get("asn", ""), entry.get("confidence", "")),
+                values=(entry["ip"], entry.get("asn", ""), entry.get("isp", ""), conf_display),
             )
 
+        # 子網域（被動 DNS / CT 解析）
         for hit in result.get("subdomain_hits", []):
             if not hit.get("behind_cloudflare"):
                 self._sub_tree.insert(
                     "", "end",
-                    values=(hit["host"], hit["ip"]),
+                    values=(hit["host"], hit["ip"], "子網域"),
+                )
+
+        # 頁面參照（主動抓取）
+        for hit in result.get("page_hits", []):
+            if not hit.get("behind_cloudflare"):
+                self._sub_tree.insert(
+                    "", "end",
+                    values=(hit["host"], hit["ip"], "頁面"),
                 )
 
     # ── 選取事件 ──────────────────────────────────────────────────────────────
@@ -388,19 +424,24 @@ class CloudFailPanel(ctk.CTkFrame):
             return {}
         target = self._scan_result.get("target", "")
         asn = ""
+        isp = ""
         for entry in self._scan_result.get("non_cf_ips", []):
             if entry["ip"] == ip:
                 asn = entry.get("asn", "")
+                isp = entry.get("isp", "")
                 break
+        notes = f"由網站溯源功能發現（目標網域：{target}）"
+        if asn:
+            notes += f"；ASN：{asn}"
         return {
             "case_id":          case_id,
             "addr_type":        "主機IP",
-            "chain_institution": asn or "未知",
+            "chain_institution": isp or asn or "未知",
             "address":          ip,
             "holder_role":      "不明",
             "label":            f"{target}{label_suffix}",
             "source_doc":       "",
-            "notes":            f"由網站溯源功能發現（目標網域：{target}）",
+            "notes":            notes,
         }
 
     def _add_selected_to_case(self) -> None:
@@ -418,8 +459,8 @@ class CloudFailPanel(ctk.CTkFrame):
             data = self._make_addr_data(str(ip))
         elif sub_sel:
             vals = self._sub_tree.item(sub_sel[0])["values"]
-            ip = str(vals[1])
             host = str(vals[0])
+            ip   = str(vals[1])
             data = self._make_addr_data(ip, f" / {host}")
         else:
             return
@@ -470,3 +511,48 @@ class CloudFailPanel(ctk.CTkFrame):
         with open(path, "w", encoding="utf-8") as f:
             json.dump(self._scan_result, f, ensure_ascii=False, indent=2)
         self._log("Phase4", f"✔ 已匯出至：{path}")
+
+    def _export_pdf(self) -> None:
+        if not self._scan_result:
+            return
+        from tkinter import filedialog
+        import threading
+        target = self._scan_result.get("target", "scan")
+        path = filedialog.asksaveasfilename(
+            defaultextension=".pdf",
+            filetypes=[("PDF", "*.pdf")],
+            initialfile=f"webscan_{target}.pdf",
+            title="匯出 PDF 鑑識報告",
+        )
+        if not path:
+            return
+
+        self._pdf_btn.configure(state="disabled", text="產生中…")
+        self._log("Phase4", "正在產生 PDF 報告，請稍候…")
+
+        result = self._scan_result
+        case_name = self._get_case_name()
+
+        def _gen():
+            try:
+                from api.pdf_report import generate_website_scan_pdf
+                generate_website_scan_pdf(result, case_name, path)
+                self.after(0, self._on_pdf_done, path, None)
+            except Exception as exc:
+                self.after(0, self._on_pdf_done, path, exc)
+
+        threading.Thread(target=_gen, daemon=True).start()
+
+    def _on_pdf_done(self, path: str, error) -> None:
+        self._pdf_btn.configure(state="normal", text="📄  匯出 PDF 報告")
+        if error:
+            self._log("Phase4", f"❌ PDF 產生失敗：{error}")
+            messagebox.showerror("PDF 錯誤", f"報告產生失敗：\n{error}")
+        else:
+            self._log("Phase4", f"✔ PDF 報告已產生：{path}")
+            if messagebox.askyesno("完成", f"PDF 報告已儲存至：\n{path}\n\n是否立即開啟？"):
+                import os, subprocess
+                try:
+                    os.startfile(path)
+                except Exception:
+                    subprocess.Popen(["explorer", path])
