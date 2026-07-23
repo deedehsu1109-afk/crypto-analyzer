@@ -1733,8 +1733,8 @@ class App(ctk.CTk):
                      text_color="#a78bfa").grid(
             row=0, column=0, padx=16, pady=(16, 4), sticky="w")
         ctk.CTkLabel(right,
-                     text="依案件基本資料產製「虛擬貨幣詐欺案件分析範本」Word 文件\n"
-                          "九大章節架構，適用於偵查報告與法庭提呈",
+                     text="把查詢紀錄（地址分析／Hash查詢／涉案地址／陳述交易／網站溯源）\n"
+                          "編排成卡片，自由排序與修改文字後產製 Word 文件",
                      font=("Microsoft JhengHei", 10),
                      text_color="gray50", justify="left").grid(
             row=1, column=0, padx=16, pady=(0, 8), sticky="w")
@@ -1742,10 +1742,10 @@ class App(ctk.CTk):
             right, font=("Consolas", 10), fg_color="#080d14",
             text_color="#c4b5fd", corner_radius=6, state="disabled")
         self._case_report_log.grid(row=2, column=0, sticky="nsew", padx=12, pady=(0, 8))
-        ctk.CTkButton(right, text="▶  產製案件分析報告",
+        ctk.CTkButton(right, text="📋  卡片編排 → 產製案件分析報告",
                       font=("Microsoft JhengHei", 12, "bold"),
                       fg_color="#4c1d95", hover_color="#3b1a7a",
-                      height=42, command=self._generate_case_report).grid(
+                      height=42, command=self._open_case_report_editor).grid(
             row=3, column=0, padx=12, pady=(0, 16), sticky="ew")
 
         # ── 底部：交易所調閱申請書（橫跨兩欄） ──
@@ -1858,7 +1858,7 @@ class App(ctk.CTk):
                            f"  ✘ 錯誤：{e}")
         threading.Thread(target=do_gen, daemon=True).start()
 
-    def _generate_case_report(self):
+    def _open_case_report_editor(self):
         if not self._active_case:
             messagebox.showinfo("請先選擇案件", "請先在步驟 3 選擇案件後再產製報告。")
             return
@@ -1866,31 +1866,49 @@ class App(ctk.CTk):
         if not out_dir:
             messagebox.showwarning("缺少輸出目錄", "請先選擇報告輸出目錄。")
             return
-        import os
+
         case = self._active_case
         op   = self.config_data.get("operator", {})
-        ts   = datetime.datetime.now().strftime("%Y%m%d%H%M")
-        fname = f"案件分析報告_{case['case_number']}_{ts}.docx"
+        case_info = {
+            "case_number":  case.get("case_number", ""),
+            "case_name":    case.get("case_name", ""),
+            "case_type":    case.get("case_type", ""),
+            "investigator": op.get("identity_name", ""),
+            "unit":         op.get("identity_unit", ""),
+            "report_date":  datetime.datetime.now().strftime("%Y年%m月%d日"),
+        }
+
+        from exporter.report_cards import build_available_cards
+        try:
+            cards = build_available_cards(case["id"])
+        except Exception as e:
+            messagebox.showerror("讀取查詢紀錄失敗", str(e))
+            return
+
+        from gui.case_report_card_editor import CardReportEditor
+        CardReportEditor(
+            self, case_info, cards,
+            on_confirm=lambda ordered: self._build_case_report_from_cards(
+                case_info, out_dir, ordered))
+
+    def _build_case_report_from_cards(self, case_info: dict, out_dir: str,
+                                       ordered_cards: list[dict]):
+        import os
+        ts = datetime.datetime.now().strftime("%Y%m%d%H%M")
+        fname = f"案件分析報告_{case_info.get('case_number', '')}_{ts}.docx"
         out_path = os.path.join(out_dir, fname)
 
         self._append_report_log(self._case_report_log,
-            f"[{datetime.datetime.now().strftime('%H:%M:%S')}] 開始產製案件分析報告…")
+            f"[{datetime.datetime.now().strftime('%H:%M:%S')}] 開始產製案件分析報告（卡片編排版）…")
         self._append_report_log(self._case_report_log,
-            f"  案件：{case['case_number']} {case['case_name']}")
+            f"  案件：{case_info.get('case_number', '')} {case_info.get('case_name', '')}")
+        self._append_report_log(self._case_report_log,
+            f"  卡片數量：{len(ordered_cards)}")
 
         def do_gen():
             try:
-                from exporter.case_template_builder import build_case_doc
-                data = {
-                    "case_number":  case.get("case_number", ""),
-                    "case_name":    case.get("case_name", ""),
-                    "case_type":    case.get("case_type", ""),
-                    "investigator": op.get("identity_name", ""),
-                    "unit":         op.get("identity_unit", ""),
-                    "description":  case.get("description", ""),
-                    "report_date":  datetime.datetime.now().strftime("%Y年%m月%d日"),
-                }
-                build_case_doc(data, out_path)
+                from exporter.case_template_builder import build_case_doc_from_cards
+                build_case_doc_from_cards(case_info, ordered_cards, out_path)
                 self.after(0, self._append_report_log, self._case_report_log,
                            f"  ✔ 完成：{out_path}")
                 self.after(0, self.status_var.set, f"案件報告已產製：{fname}")

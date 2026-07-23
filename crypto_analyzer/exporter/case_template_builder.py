@@ -375,6 +375,64 @@ def build_case_doc(data: dict, output_path: str) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 卡片編排版：自由排序，不套用固定九大章節
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_case_doc_from_cards(case_info: dict, cards: list[dict], output_path: str) -> str:
+    """
+    依「卡片編排」介面的最終結果生成案件分析 Word 文件。
+
+    case_info: {case_number, case_name, case_type, investigator, unit, report_date}
+    cards:     [{"title": str, "text": str}, ...]，依序寫入文件本文，
+               每張卡片對應一個小標題 + 一段內文，順序完全依編排結果決定。
+    """
+    doc = Document()
+
+    section = doc.sections[0]
+    section.page_width  = Cm(21)
+    section.page_height = Cm(29.7)
+    section.left_margin = section.right_margin = Cm(2.5)
+    section.top_margin  = section.bottom_margin = Cm(2.0)
+
+    doc.styles['Normal'].font.name = 'Microsoft JhengHei'
+    doc.styles['Normal'].font.size = Pt(10.5)
+
+    C = case_info
+
+    # ── 封面標題 ──
+    _para(doc, '虛擬貨幣詐欺案件分析報告', bold=True, size=18,
+          color='1F3864', align=WD_ALIGN_PARAGRAPH.CENTER,
+          space_before=12, space_after=4)
+    _para(doc, f"案件編號：{C.get('case_number', '')}　案件名稱：{C.get('case_name', '')}",
+          size=11, color='333333', align=WD_ALIGN_PARAGRAPH.CENTER, space_after=2)
+    _para(doc, f"製作日期：{C.get('report_date', datetime.now().strftime('%Y-%m-%d'))}　"
+               f"製作人：{C.get('investigator', '__________')}　"
+               f"單位：{C.get('unit', '')}",
+          size=10, color='666666', align=WD_ALIGN_PARAGRAPH.CENTER, space_after=16)
+
+    doc.add_paragraph('─' * 60)
+
+    # ── 卡片本文（依編排順序） ──
+    for card in cards:
+        title = (card.get('title') or '').strip()
+        text  = (card.get('text') or '').strip()
+        if title:
+            _heading(doc, title, level=2)
+        if text:
+            _para(doc, text, size=10.5, space_after=10)
+
+    # ── 頁尾 ──
+    doc.add_paragraph('─' * 60)
+    _para(doc, f"本文件由 CryptoAnalyzer 系統自動生成　生成時間：{datetime.now().strftime('%Y-%m-%d %H:%M')}",
+          size=9, color='999999', align=WD_ALIGN_PARAGRAPH.CENTER)
+    _para(doc, '本文件含個人資料及偵查資訊，請依法保管，未經授權不得外洩。',
+          size=9, color='CC0000', align=WD_ALIGN_PARAGRAPH.CENTER, bold=True)
+
+    doc.save(output_path)
+    return output_path
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 本案實際資料（1-3.pdf）
 # ─────────────────────────────────────────────────────────────────────────────
 
