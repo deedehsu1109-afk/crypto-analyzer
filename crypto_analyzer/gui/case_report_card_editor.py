@@ -16,13 +16,17 @@ _SOURCE_LABELS = {
     "case_address": ("涉案地址", "#fcd34d"),
     "stated_tx":    ("陳述交易", "#f472b6"),
     "domain_scan":  ("網站溯源", "#a78bfa"),
+    "image":        ("圖片卡片", "#38bdf8"),
 }
+
+_THUMB_MAX_SIZE = (300, 200)
 
 
 class CardReportEditor(ctk.CTkToplevel):
     """
     on_confirm(ordered_cards) 會在使用者按下「確認編排，產製 DOCX」時呼叫，
-    ordered_cards 為 [{"title": str, "text": str}, ...]（已套用所有已確認的文字修改）。
+    ordered_cards 為 [{"title": str, "text": str, "kind": str, "image_path": str|None}, ...]
+    （已套用所有已確認的文字修改；kind=="image" 的卡片才會有 image_path）。
     """
 
     def __init__(self, parent, case_info: dict, available_cards: list[dict], on_confirm):
@@ -34,6 +38,7 @@ class CardReportEditor(ctk.CTkToplevel):
         self._widgets: dict[str, ctk.CTkTextbox] = {}
         self._editing:  set[str] = set()   # 目前處於「編輯中」的卡片 id
         self._drafts:   dict[str, str] = {}  # 編輯中、尚未確認的暫存文字（重繪畫面時保留用）
+        self._thumb_cache: dict[str, ctk.CTkImage] = {}  # 圖片卡片縮圖快取
 
         self.title("📋  案件分析報告 — 卡片編排")
         self.geometry("1320x820")
@@ -189,8 +194,18 @@ class CardReportEditor(ctk.CTkToplevel):
                               font=("Microsoft JhengHei", 10), fg_color="#1e4620",
                               command=lambda c=card: self._move_to_arranged(c)).pack(side="left", padx=2)
 
+        if card.get("kind") == "image":
+            thumb = self._get_thumbnail(card.get("image_path"))
+            if thumb is not None:
+                ctk.CTkLabel(frame, image=thumb, text="").pack(padx=10, pady=(2, 4))
+            else:
+                ctk.CTkLabel(frame, text="（圖片讀取失敗，檔案可能已移動或刪除）",
+                             font=("Microsoft JhengHei", 10), text_color="#f87171").pack(
+                    padx=10, pady=(2, 4))
+
         initial_text = self._drafts.get(card["id"], card.get("text", ""))
-        tb = ctk.CTkTextbox(frame, font=("Microsoft JhengHei", 11), height=70,
+        tb_height = 44 if card.get("kind") == "image" else 70
+        tb = ctk.CTkTextbox(frame, font=("Microsoft JhengHei", 11), height=tb_height,
                             fg_color="#0d1420" if editing else "#11182a",
                             text_color="#f1f5f9" if editing else "#8b95ab",
                             corner_radius=6, wrap="word")
@@ -199,6 +214,21 @@ class CardReportEditor(ctk.CTkToplevel):
         if not editing:
             tb.configure(state="disabled")
         self._widgets[card["id"]] = tb
+
+    def _get_thumbnail(self, image_path: str | None):
+        if not image_path:
+            return None
+        if image_path in self._thumb_cache:
+            return self._thumb_cache[image_path]
+        try:
+            from PIL import Image
+            img = Image.open(image_path)
+            img.thumbnail(_THUMB_MAX_SIZE)
+            ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
+        except Exception:
+            return None
+        self._thumb_cache[image_path] = ctk_img
+        return ctk_img
 
     # ── 編輯中文字暫存（防止搬移/排序其他卡片時遺失尚未確認的編輯） ─────────
 
@@ -286,7 +316,11 @@ class CardReportEditor(ctk.CTkToplevel):
                     "確認", "尚未加入任何卡片，報告內容會是空的，仍要繼續產製嗎？",
                     parent=self):
                 return
-        ordered = [{"title": c["title"], "text": c["text"]} for c in self._arranged]
+        ordered = [
+            {"title": c["title"], "text": c["text"],
+             "kind": c.get("kind", "text"), "image_path": c.get("image_path")}
+            for c in self._arranged
+        ]
         callback = self.on_confirm
         self.destroy()
         callback(ordered)

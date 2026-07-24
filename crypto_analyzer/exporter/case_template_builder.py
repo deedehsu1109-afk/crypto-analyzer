@@ -418,7 +418,22 @@ def build_case_doc_from_cards(case_info: dict, cards: list[dict], output_path: s
         text  = (card.get('text') or '').strip()
         if title:
             _heading(doc, title, level=2)
-        if text:
+
+        if card.get('kind') == 'image':
+            image_path = card.get('image_path')
+            if image_path and os.path.isfile(image_path):
+                try:
+                    doc.add_picture(image_path, width=Cm(15))
+                    last_p = doc.paragraphs[-1]
+                    last_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                except Exception as e:
+                    _para(doc, f"（圖片插入失敗：{e}）", size=9, color='CC0000')
+            else:
+                _para(doc, f"（圖片檔案不存在：{image_path}）", size=9, color='CC0000')
+            if text:
+                _para(doc, text, size=9.5, color='666666',
+                      align=WD_ALIGN_PARAGRAPH.CENTER, space_after=10)
+        elif text:
             _para(doc, text, size=10.5, space_after=10)
 
     # ── 頁尾 ──

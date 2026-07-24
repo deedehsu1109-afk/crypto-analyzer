@@ -1,9 +1,10 @@
 """
 report_cards.py
-把案件的各類查詢紀錄（地址分析、Hash 查詢、涉案地址、被害人陳述交易、網站溯源）
-轉換成可編輯的「卡片」，供案件分析報告的卡片編排介面使用。
+把案件的各類查詢紀錄（地址分析、Hash 查詢、涉案地址、被害人陳述交易、網站溯源、
+幣流圖圖片快照）轉換成可編輯的「卡片」，供案件分析報告的卡片編排介面使用。
 
-每張卡片：{"id": str, "source": str, "title": str, "text": str}
+每張卡片：{"id": str, "source": str, "kind": "text"|"image", "title": str,
+          "text": str, "image_path": str（僅 kind=="image" 時有值）}
 """
 from __future__ import annotations
 
@@ -15,11 +16,15 @@ _SOURCE_LABELS = {
     "case_address": "涉案地址",
     "stated_tx":    "陳述交易",
     "domain_scan":  "網站溯源",
+    "image":        "圖片卡片",
 }
 
 
-def _card(source: str, key, title: str, text: str) -> dict:
-    return {"id": f"{source}:{key}", "source": source, "title": title, "text": text}
+def _card(source: str, key, title: str, text: str, kind: str = "text", **extra) -> dict:
+    card = {"id": f"{source}:{key}", "source": source, "kind": kind,
+            "title": title, "text": text}
+    card.update(extra)
+    return card
 
 
 def _short(s: str, head: int = 10, tail: int = 6) -> str:
@@ -137,6 +142,12 @@ def domain_scan_to_card(row: dict) -> dict:
     return _card("domain_scan", row.get("id"), title, text)
 
 
+def flow_graph_image_to_card(row: dict) -> dict:
+    title = row.get("title") or "幣流圖快照"
+    return _card("image", row.get("id"), title, title,
+                 kind="image", image_path=row.get("image_path"))
+
+
 def build_available_cards(case_id: int) -> list[dict]:
     """彙整案件的所有查詢紀錄，轉換成可編輯卡片清單（未經篩選，供編排介面呈現）。"""
     from database import db as _db
@@ -158,4 +169,6 @@ def build_available_cards(case_id: int) -> list[dict]:
         cards.append(stated_tx_to_card(row))
     for row in _db.get_domain_scans(case_id):
         cards.append(domain_scan_to_card(row))
+    for row in _db.get_report_images(case_id):
+        cards.append(flow_graph_image_to_card(row))
     return cards

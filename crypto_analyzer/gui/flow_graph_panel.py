@@ -380,7 +380,7 @@ class FlowGraphPanel(ctk.CTkFrame):
                       fg_color="#6a4a2a",
                       command=self._save_snapshot).grid(row=0, column=7, padx=4, pady=8)
 
-        ctk.CTkButton(bar, text="匯出圖片", width=80,
+        ctk.CTkButton(bar, text="🖼 圖片卡片", width=88,
                       font=("Microsoft JhengHei", 11),
                       fg_color="#2d6a4f",
                       command=self._export_image).grid(row=0, column=8, padx=4, pady=8)
@@ -1416,6 +1416,51 @@ class FlowGraphPanel(ctk.CTkFrame):
         messagebox.showinfo("已儲存", "幣流圖已更新至案件資料。", parent=self)
 
     def _export_image(self):
+        """建立幣流圖圖片卡片：存成圖片並登記進案件資料，供「案件分析報告」的卡片編排介面使用。
+        若目前沒有作業中的案件（探索模式），退回原本的「另存為任意檔案」匯出方式。"""
+        if not self._state or not self._state.nodes:
+            messagebox.showinfo("提示", "尚無幣流圖資料。", parent=self)
+            return
+
+        case_id = getattr(self, "_current_case_id", None)
+        if not case_id:
+            self._export_image_to_file()
+            return
+
+        import os
+        import datetime
+
+        view = self._view_mode.get()
+        default_title = f"{view}｜{datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        title = simpledialog.askstring(
+            "建立圖片卡片", "卡片標題／說明：",
+            initialvalue=default_title, parent=self)
+        if title is None:
+            return
+        title = title.strip() or default_title
+
+        try:
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            img_dir = os.path.join(base_dir, "data", "case_images", str(case_id))
+            os.makedirs(img_dir, exist_ok=True)
+            fname = f"flowgraph_{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}.png"
+            img_path = os.path.join(img_dir, fname)
+
+            self._fig.savefig(img_path, dpi=150, bbox_inches="tight", facecolor="white")
+
+            from database import db as _db
+            _db.add_report_image(case_id, title, img_path, view)
+
+            messagebox.showinfo(
+                "已建立圖片卡片",
+                f"已將目前畫面存成圖片卡片，可在「產製報告」步驟的「案件分析報告」"
+                f"卡片編排介面中加入報告。\n\n{img_path}",
+                parent=self)
+        except Exception as e:
+            messagebox.showerror("建立失敗", str(e), parent=self)
+
+    def _export_image_to_file(self):
+        """探索模式（無作業中案件）時使用：另存為使用者自選路徑的圖片檔案。"""
         path = filedialog.asksaveasfilename(
             parent=self,
             title="匯出幣流圖",

@@ -254,6 +254,17 @@ def init_db():
             created_at   TEXT DEFAULT (datetime('now','localtime'))
         );
         CREATE INDEX IF NOT EXISTS idx_domain_scans_case ON domain_scans(case_id);
+
+        -- ── 案件分析報告：圖片卡片（例如幣流圖快照） ────────────────────────────
+        CREATE TABLE IF NOT EXISTS case_report_images (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id     INTEGER REFERENCES cases(id) ON DELETE CASCADE,
+            title       TEXT,           -- 卡片標題／圖說
+            image_path  TEXT NOT NULL,  -- 圖片檔案路徑
+            source_view TEXT,           -- 產生當下的來源（如幣流圖視圖模式）
+            created_at  TEXT DEFAULT (datetime('now','localtime'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_report_images_case ON case_report_images(case_id);
         """)
         # 遷移：對舊資料庫補欄位（若尚未存在）
         _migrate(con)
@@ -1183,3 +1194,30 @@ def get_domain_scan_result(scan_id: int) -> dict | None:
         except Exception:
             pass
     return None
+
+
+# ── 案件分析報告：圖片卡片 ────────────────────────────────────────────────────
+
+def get_report_images(case_id: int) -> list[dict]:
+    with _conn() as con:
+        rows = con.execute(
+            "SELECT * FROM case_report_images WHERE case_id=? ORDER BY created_at DESC",
+            (case_id,)
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def add_report_image(case_id: int, title: str, image_path: str,
+                      source_view: str = "") -> int:
+    with _conn() as con:
+        cur = con.execute(
+            "INSERT INTO case_report_images (case_id, title, image_path, source_view) "
+            "VALUES (?, ?, ?, ?)",
+            (case_id, title, image_path, source_view),
+        )
+        return cur.lastrowid
+
+
+def delete_report_image(image_id: int):
+    with _conn() as con:
+        con.execute("DELETE FROM case_report_images WHERE id=?", (image_id,))
