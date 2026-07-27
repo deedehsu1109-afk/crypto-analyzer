@@ -120,18 +120,13 @@ class FlowGraphPanel(ctk.CTkFrame):
             self._edge_waypoints = self._deserialize_edge_waypoints(
                 snap.get("edge_waypoints", {}))
         else:
-            # ── 無快照：從交易記錄重建（不限鏈別，chain=None 全部取出）────────
-            rows = _db.get_edges_for_graph(case_id=case_id, chain=chain)
-            detected = ({r.get("chain") for r in rows} - {None, ""}) or {"ETH"}
-            use_chain = detected.pop() if len(detected) == 1 else (chain or "ETH")
-            self._state = GraphState(chain=use_chain, mode="evidence")
-            self._state.add_edges_from_db_rows(rows)
-            wallets = _db.get_case_wallets(case_id)
-            for w in wallets:
-                addr = w.get("address", "")
-                if addr and addr in self._state.nodes:
-                    self._state.nodes[addr].expanded = True
-                    self._state.nodes[addr].custom_label = w.get("label", "")
+            # ── 無快照：從空白幣流圖開始 ──────────────────────────────────────
+            # 注意：這裡刻意不再自動從 get_edges_for_graph() 把案件底下「所有
+            # 查詢過/儲存過的錢包」的完整交易記錄拉進來重建圖表——查詢/儲存一個
+            # 錢包地址，不代表使用者就想把它的全部交易畫進幣流圖。是否加入圖表
+            # 一律交由使用者透過「加入幣流圖」「＋ 節點」「＋ 交易」「↑ CSV」
+            # 等按鈕明確決定。
+            self._state = GraphState(chain=chain or "ETH", mode="evidence")
             self._pos_network = {}
             self._pos_maltego = {}
             self._edge_waypoints = {}
@@ -160,14 +155,24 @@ class FlowGraphPanel(ctk.CTkFrame):
             self._state.nodes[addr].expanded = True
         self._render()
 
+    def _ensure_state(self, default_chain: str = "TRX"):
+        """確保 self._state 存在；若原本是 None，依目前是否有作業中案件決定模式
+        （有作業中案件 → 證據模式；沒有 → 探索模式），而不是不分青紅皂白一律
+        設成探索模式——否則案件模式下第一次手動加入節點/交易時，會被誤標成
+        「探索模式」，跟畫面上顯示的案件狀態矛盾。"""
+        if self._state is not None:
+            return
+        case_id = getattr(self, "_current_case_id", None)
+        mode = "evidence" if case_id else "explore"
+        self._state = GraphState(chain=default_chain, mode=mode)
+        self._gen_mode.set(mode)
+        self._update_mode_label()
+
     def add_address_node(self, address: str, chain: str, label: str = ""):
         """地址模式：僅新增單一節點，不加入任何交易邊。"""
         if not address:
             return
-        if self._state is None:
-            self._state = GraphState(chain=chain, mode="explore")
-            self._gen_mode.set("explore")
-            self._update_mode_label()
+        self._ensure_state(default_chain=chain)
         node = self._state.add_node(address)
         if label:
             node.custom_label = label
@@ -179,10 +184,7 @@ class FlowGraphPanel(ctk.CTkFrame):
         tx_hash  = result.get("hash", "")
         time_str = result.get("時間", "")
 
-        if self._state is None:
-            self._state = GraphState(chain=chain, mode="explore")
-            self._gen_mode.set("explore")
-            self._update_mode_label()
+        self._ensure_state(default_chain=chain)
 
         rows: list[dict] = []
 
@@ -281,10 +283,7 @@ class FlowGraphPanel(ctk.CTkFrame):
         """從 treeview 單列資料直接新增一條交易邊。"""
         if not from_addr or not to_addr:
             return
-        if self._state is None:
-            self._state = GraphState(chain=chain, mode="explore")
-            self._gen_mode.set("explore")
-            self._update_mode_label()
+        self._ensure_state(default_chain=chain)
         tx_type = "token" if token_symbol else "normal"
         self._state.add_edges_from_db_rows([{
             "from_addr":    from_addr,
@@ -322,6 +321,27 @@ class FlowGraphPanel(ctk.CTkFrame):
                           fontfamily="Microsoft JhengHei")
             self._mpl_canvas.draw()
         self._update_stats()
+
+    def _clear_case_graph(self):
+        """清空目前案件已儲存在資料庫的幣流圖快照，並重置畫面；此動作無法復原。
+        跟「清除圖」不同：「清除圖」只清空目前畫面（重新整理/重新開啟案件時，
+        已儲存的快照仍會還原回來），這個功能會連同資料庫裡的快照一併刪除。"""
+        case_id = getattr(self, "_current_case_id", None)
+        if not case_id:
+            # 探索模式（無作業中案件）沒有快照可清，等同一般清除圖
+            self.clear()
+            return
+        if not messagebox.askyesno(
+                "清空幣流圖",
+                "這會刪除此案件已儲存的幣流圖快照，並清空目前畫面內容，此動作無法復原。\n\n"
+                "確定要繼續嗎？",
+                parent=self):
+            return
+        from database import db as _db
+        for snap in _db.get_graph_snapshots(case_id):
+            _db.delete_graph_snapshot(snap["id"])
+        self.clear()
+        messagebox.showinfo("已清空", "已清空此案件的幣流圖資料。", parent=self)
 
     # ── UI 建構 ───────────────────────────────────────────────────────────────
 
@@ -390,33 +410,38 @@ class FlowGraphPanel(ctk.CTkFrame):
                       fg_color="gray30",
                       command=self.clear).grid(row=0, column=9, padx=(4, 4), pady=8)
 
+        ctk.CTkButton(bar, text="🗑 清空幣流圖", width=100,
+                      font=("Microsoft JhengHei", 11),
+                      fg_color="#7a1f1f",
+                      command=self._clear_case_graph).grid(row=0, column=10, padx=(0, 4), pady=8)
+
         ctk.CTkLabel(bar, text="│", text_color="gray40",
-                     font=("Arial", 16)).grid(row=0, column=10, padx=2)
+                     font=("Arial", 16)).grid(row=0, column=11, padx=2)
 
         ctk.CTkButton(bar, text="＋ 節點", width=72,
                       font=("Microsoft JhengHei", 11),
                       fg_color="#1e3a5f",
-                      command=self._add_node_manual_dialog).grid(row=0, column=11, padx=2, pady=8)
+                      command=self._add_node_manual_dialog).grid(row=0, column=12, padx=2, pady=8)
 
         ctk.CTkButton(bar, text="＋ 交易", width=72,
                       font=("Microsoft JhengHei", 11),
                       fg_color="#3a1e5f",
-                      command=self._add_edge_manual_dialog).grid(row=0, column=12, padx=2, pady=8)
+                      command=self._add_edge_manual_dialog).grid(row=0, column=13, padx=2, pady=8)
 
         ctk.CTkButton(bar, text="↑ CSV", width=65,
                       font=("Microsoft JhengHei", 11),
                       fg_color="#1e3a2a",
-                      command=self._import_csv_dialog).grid(row=0, column=13, padx=2, pady=8)
+                      command=self._import_csv_dialog).grid(row=0, column=14, padx=2, pady=8)
 
         ctk.CTkButton(bar, text="💾 存檔", width=72,
                       font=("Microsoft JhengHei", 11),
                       fg_color="#2a3a1e",
-                      command=self._save_graph_json).grid(row=0, column=14, padx=2, pady=8)
+                      command=self._save_graph_json).grid(row=0, column=15, padx=2, pady=8)
 
         ctk.CTkButton(bar, text="📂 讀檔", width=72,
                       font=("Microsoft JhengHei", 11),
                       fg_color="#1e2a3a",
-                      command=self._load_graph_json).grid(row=0, column=15, padx=(2, 12), pady=8)
+                      command=self._load_graph_json).grid(row=0, column=16, padx=(2, 12), pady=8)
 
     def _build_canvas_area(self):
         frame = ctk.CTkFrame(self, fg_color=BG_DARK, corner_radius=0)
@@ -1804,10 +1829,9 @@ class FlowGraphPanel(ctk.CTkFrame):
             if not addr:
                 messagebox.showwarning("缺少資料", "地址不可空白。", parent=dlg)
                 return
-            if self._state is None:
-                self._state = GraphState(chain=chain_var.get(), mode="explore")
-                self._gen_mode.set("explore")
-                self._update_mode_label()
+            was_fresh = self._state is None
+            self._ensure_state(default_chain=chain_var.get())
+            if was_fresh:
                 self._pos_network = {}
                 self._pos_maltego = {}
                 self._edge_waypoints = {}
@@ -1828,10 +1852,7 @@ class FlowGraphPanel(ctk.CTkFrame):
 
     def _add_edge_manual_dialog(self):
         """手動新增交易紀錄（金流邊）對話框。"""
-        if self._state is None:
-            self._state = GraphState(chain="TRX", mode="explore")
-            self._gen_mode.set("explore")
-            self._update_mode_label()
+        self._ensure_state(default_chain="TRX")
 
         dlg = ctk.CTkToplevel(self)
         dlg.title("新增交易紀錄")
@@ -1984,10 +2005,7 @@ class FlowGraphPanel(ctk.CTkFrame):
             return ""
 
         was_fresh = (self._state is None)
-        if self._state is None:
-            self._state = GraphState(chain="TRX", mode="explore")
-            self._gen_mode.set("explore")
-            self._update_mode_label()
+        self._ensure_state(default_chain="TRX")
 
         imported, skipped = 0, []
 
