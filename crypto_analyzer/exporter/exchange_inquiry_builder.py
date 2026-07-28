@@ -436,6 +436,29 @@ KNOWN_EXCHANGES: dict[str, str] = {
     "其他":      "",
 }
 
+# ── 特殊受文者資訊：多實體交易所（取自 發文至幣安之公文注意事項_20260115.pdf，2026-07-28）─────
+# 自 2026-01-05 起，幣安改由 ADGM（阿布達比全球市場）核准之下列三個法律實體運營，
+# 官方要求發文受文者須「同時臚列」三者，不可只寫 Binance。
+# EXCHANGE_RECIPIENT_OVERRIDES：交易所鍵值 → 申請書「受文者」欄實際應載明的全稱
+# EXCHANGE_RECIPIENT_DETAILS：交易所鍵值 → 各實體之地址/註冊號詳細資訊列表（供申請書附註列出）
+EXCHANGE_RECIPIENT_OVERRIDES: dict[str, str] = {
+    "Binance": "Nest Exchange Limited、Nest Clearing and Custody Limited 及 Nest Trading Limited",
+}
+
+EXCHANGE_RECIPIENT_DETAILS: dict[str, list[dict[str, str]]] = {
+    "Binance": [
+        {"name": "Nest Exchange Limited",
+         "address": "Addax Tower, Office 4606, Al Reem Island, Abu Dhabi, UAE",
+         "reg_no": "000032533"},
+        {"name": "Nest Clearing and Custody Limited",
+         "address": "Addax Tower, Office 4606, Al Reem Island, Abu Dhabi, UAE",
+         "reg_no": "000007529"},
+        {"name": "Nest Trading Limited",
+         "address": "Office 4607, Al Reem Island, Abu Dhabi, UAE",
+         "reg_no": "260000"},
+    ],
+}
+
 # ── 案件性質（依範本順序與分行排列） ─────────────────────────────────────────
 # 每個 tuple：(中文名稱, 英文名稱)
 # 前 6 項三個一排，後續每項一行
@@ -584,6 +607,22 @@ def _today_str() -> str:
     return datetime.date.today().strftime("%Y-%m-%d")
 
 
+def _recipient_detail_lines(recipient_detail: list[dict[str, str]]) -> list[str]:
+    """將受文者多實體詳細資訊（EXCHANGE_RECIPIENT_DETAILS 格式）轉為可列印文字行。"""
+    lines = []
+    for i, ent in enumerate(recipient_detail, start=1):
+        name    = ent.get("name", "")
+        address = ent.get("address", "")
+        reg_no  = ent.get("reg_no", "")
+        line = f"{i}. {name}"
+        if address:
+            line += f" － {address}"
+        if reg_no:
+            line += f"（註冊號：{reg_no}）"
+        lines.append(line)
+    return lines
+
+
 def _segment_text(text: str) -> list[tuple[str, str]]:
     """
     將文字切分為 (type, segment) 串列。
@@ -730,6 +769,8 @@ def build_docx(data: dict, out_path: str) -> None:
         _p(f"Official Ref. No.: {doc_num}")
     if rec_email:
         _p(f"Via email to: {rec_email}")
+    for line in _recipient_detail_lines(data.get("recipient_detail", [])):
+        _p(line, size=10)
 
     _blank()
 
@@ -1091,6 +1132,8 @@ def build_odt(data: dict, out_path: str) -> None:
     _add_p(f"Date:{doc_date}")
     if doc_num:   _add_p(f"Official Ref. No.: {doc_num}")
     if rec_email: _add_p(f"Via email to: {rec_email}")
+    for line in _recipient_detail_lines(data.get("recipient_detail", [])):
+        _add_p(line, "Small")
     _blank()
 
     # 4. 案件性質
@@ -1404,6 +1447,8 @@ def build_pdf(data: dict, out_path: str) -> None:
     story.append(_p(f"Date:{doc_date}"))
     if doc_num:   story.append(_p(f"Official Ref. No.: {doc_num}"))
     if rec_email: story.append(_p(f"Via email to: {rec_email}"))
+    for line in _recipient_detail_lines(data.get("recipient_detail", [])):
+        story.append(_p(line, small))
     story.append(_sp(8))
 
     # 4. 案件性質

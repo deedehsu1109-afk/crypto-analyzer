@@ -14,6 +14,7 @@ from exporter.exchange_inquiry_builder import (
     KNOWN_EXCHANGES, CASE_TYPES, PROVIDE_ITEMS, REQUEST_ITEMS,
     ATTACHMENT_OPTIONS, build_inquiry, _today_str,
     auto_translate_agency, auto_translate_address, translate_long,
+    EXCHANGE_RECIPIENT_OVERRIDES, EXCHANGE_RECIPIENT_DETAILS,
 )
 
 
@@ -921,8 +922,10 @@ class ExchangeInquiryDialog(ctk.CTkToplevel):
             # 發文資訊
             "doc_date":              self._doc_date_entry.get().strip(),
             "doc_number":            self._doc_number_entry.get().strip(),
-            # 受文者
-            "recipient_name":        exchange,
+            # 受文者（部分交易所受文者全稱為多實體，需以 EXCHANGE_RECIPIENT_OVERRIDES 取代顯示名稱）
+            "exchange_key":          exchange,
+            "recipient_name":        EXCHANGE_RECIPIENT_OVERRIDES.get(exchange, exchange),
+            "recipient_detail":      EXCHANGE_RECIPIENT_DETAILS.get(exchange, []),
             "recipient_email":       self._recipient_email_entry.get().strip(),
             # 案件
             "case_number":           self._case.get("case_number", ""),
@@ -958,7 +961,7 @@ class ExchangeInquiryDialog(ctk.CTkToplevel):
 
         case_num     = self._case.get("case_number", "inquiry")
         ts           = datetime.datetime.now().strftime("%Y%m%d%H%M")
-        exch_safe    = data["recipient_name"].replace("/", "-").replace("\\", "-")
+        exch_safe    = data["exchange_key"].replace("/", "-").replace("\\", "-")
         fname        = f"調閱申請書_{exch_safe}_{case_num}_{ts}.{fmt}"
         out_path     = os.path.join(out_dir, fname)
 
