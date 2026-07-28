@@ -408,6 +408,31 @@ KNOWN_EXCHANGES: dict[str, str] = {
     "Bitpay":                     "subpoenas@bitpay.com",
     "Crypto.com (Rest of World)": "",
 
+    # ── 以下取自 VASP調閱指引_V7_20260109.pdf（彙整於 D:\claude\交易所調閱資訊彙整表.md，2026-07-24）
+    # 國內交易所 email 欄位留空者，代表主要透過司法單位調閱平台/電子公文系統受理，
+    # 無公開直接 email，送件前請至彙整表對應之調閱管道查詢
+    "幣託 BitoPro":  "",
+    "現代財富":      "",
+    "禾亞":          "",
+    "富昇":          "",
+    "XREX":          "compliance@XREX.io",
+    "Pionex 派網":    "service@pionex.com",
+    "Bitpie 比特派":  "support@bitpie.com",
+    "Poloniex":      "compliance@poloniex.com",
+    "BTSE":          "",
+    "CoinEx":        "compliance@coinex.com",
+    "SafePal":       "legal@safepal.io",
+    "XT.com":        "support@xt.com",
+    "BuyUcoin":      "legal@buyucoin.com",
+    "SWFT":          "contact@swft.pro",
+    "Satang":        "corporate-strategy@satangcorp.com",
+    "Binance Turkey": "fraud@trbinance.com",
+    "Switchain":     "compliance@switchain.com",
+    "BTCC":          "support@btcc.com",
+    "Ownbit":        "support@ownbit.io",
+    "imToken":       "hack@token.im",
+    "TokenPocket":   "legalsupport@tokenpocket.pro",
+
     "其他":      "",
 }
 
