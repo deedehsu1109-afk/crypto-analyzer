@@ -265,6 +265,18 @@ def init_db():
             created_at  TEXT DEFAULT (datetime('now','localtime'))
         );
         CREATE INDEX IF NOT EXISTS idx_report_images_case ON case_report_images(case_id);
+
+        -- ── 匯入文件（原始檔案存檔＋完整擷取文字，供之後查看/開啟原始檔） ──────────
+        CREATE TABLE IF NOT EXISTS case_documents (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id        INTEGER REFERENCES cases(id) ON DELETE CASCADE,
+            original_name  TEXT    NOT NULL,  -- 使用者匯入時的原始檔名
+            stored_path    TEXT    NOT NULL,  -- 系統複製後的實際存檔路徑
+            file_ext       TEXT,              -- 副檔名（不含點）
+            extracted_text TEXT,              -- analyze_files() 擷取之完整文字（不截斷）
+            imported_at    TEXT    DEFAULT (datetime('now','localtime'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_case_documents_case ON case_documents(case_id);
         """)
         # 遷移：對舊資料庫補欄位（若尚未存在）
         _migrate(con)
@@ -1221,3 +1233,26 @@ def add_report_image(case_id: int, title: str, image_path: str,
 def delete_report_image(image_id: int):
     with _conn() as con:
         con.execute("DELETE FROM case_report_images WHERE id=?", (image_id,))
+
+
+# ── 匯入文件（原始檔案＋擷取文字） ─────────────────────────────────────────────
+
+def add_case_document(case_id: int, original_name: str, stored_path: str,
+                       file_ext: str = "", extracted_text: str = "") -> int:
+    with _conn() as con:
+        cur = con.execute(
+            "INSERT INTO case_documents "
+            "(case_id, original_name, stored_path, file_ext, extracted_text) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (case_id, original_name, stored_path, file_ext, extracted_text),
+        )
+        return cur.lastrowid
+
+
+def get_case_documents(case_id: int) -> list[dict]:
+    with _conn() as con:
+        rows = con.execute(
+            "SELECT * FROM case_documents WHERE case_id=? ORDER BY imported_at DESC",
+            (case_id,)
+        ).fetchall()
+    return [dict(r) for r in rows]

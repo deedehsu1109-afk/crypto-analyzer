@@ -474,6 +474,7 @@ def analyze_files(file_paths: list) -> dict:
     errors    = []
 
     all_addrs: list[dict] = []
+    file_texts: list[dict] = []  # 每份文件的完整（未截斷）擷取文字，供原始文件存檔用
 
     for fpath in file_paths:
         fname = os.path.basename(fpath)
@@ -487,6 +488,7 @@ def analyze_files(file_paths: list) -> dict:
             continue
         processed.append(fname)
         all_text.append(f"【{fname}】\n{text[:3000]}")
+        file_texts.append({"path": fpath, "filename": fname, "text": text})
         txs = _parse_transactions(text)
         for t in txs:
             t["source_doc"] = fname
@@ -500,6 +502,7 @@ def analyze_files(file_paths: list) -> dict:
         "raw_text":         "\n\n".join(all_text)[:5000],
         "transactions":     all_txs,
         "addresses":        all_addrs,
+        "file_texts":       file_texts,
     }
 
 

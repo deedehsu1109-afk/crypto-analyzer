@@ -21,6 +21,7 @@ class CaseDialog(ctk.CTkToplevel):
         self.on_save   = on_save
         self._case_id  = case["id"] if case else None  # 已存入 DB 的案件 ID
         self._pending_addrs: list[dict] = []             # 案件尚未儲存時暫存的提取地址
+        self._pending_documents: list[dict] = []          # 案件尚未儲存時暫存的匯入文件（待存檔）
         self.title("編輯案件" if case else "新建案件")
         self.geometry("960x680")
         self.resizable(True, True)
@@ -145,6 +146,10 @@ class CaseDialog(ctk.CTkToplevel):
                       font=("Microsoft JhengHei", 10),
                       fg_color="#4a3a7a",
                       command=self._import_transcript).pack(side="left", padx=10)
+        ctk.CTkButton(trans_hdr, text="📂 查看文件資料", width=140,
+                      font=("Microsoft JhengHei", 10),
+                      fg_color="#2a3556",
+                      command=self._open_document_viewer).pack(side="left", padx=(0, 10))
         ctk.CTkLabel(trans_hdr,
                      text="（可多選 PDF / DOCX / TXT，匯入完整筆錄原文）",
                      font=("Microsoft JhengHei", 9),
@@ -318,6 +323,23 @@ class CaseDialog(ctk.CTkToplevel):
 
         threading.Thread(target=do_import, daemon=True).start()
 
+    def _store_document(self, case_id: int, source_path: str, extracted_text: str) -> bool:
+        """把匯入的原始文件複製進 data/case_documents/{case_id}/ 並寫入 case_documents 資料表。"""
+        import os, shutil, datetime
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        doc_dir  = os.path.join(base_dir, "data", "case_documents", str(case_id))
+        os.makedirs(doc_dir, exist_ok=True)
+        original_name = os.path.basename(source_path)
+        ext = os.path.splitext(original_name)[1].lstrip(".").lower()
+        stamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S%f")
+        stored_path = os.path.join(doc_dir, f"{stamp}_{original_name}")
+        try:
+            shutil.copy2(source_path, stored_path)
+        except Exception:
+            return False  # 原始檔案可能已被移動/刪除，略過存檔但不中斷流程
+        _db.add_case_document(case_id, original_name, stored_path, ext, extracted_text)
+        return True
+
     def _fill_transcript(self, raw_text: str, prev_snapshot: str, result: dict):
         prev = prev_snapshot.replace("【匯入中，請稍候…】", "").strip()
         new_text = ((prev + "\n\n") if prev else "") + raw_text
@@ -326,16 +348,31 @@ class CaseDialog(ctk.CTkToplevel):
         if self._case_id:
             _db.update_case(self._case_id, transcript=new_text)
 
-        addrs = result.get("addresses", [])
+        addrs      = result.get("addresses", [])
+        file_texts = result.get("file_texts", [])
         proc  = len(result["processed_files"])
         err   = len(result["error_files"])
 
         if not addrs:
-            messagebox.showinfo(
-                "筆錄匯入完成",
-                f"已處理 {proc} 份文件（{err} 份失敗），筆錄原文已匯入。\n"
-                "未從文件中提取到錢包地址或金融帳號。",
-                parent=self)
+            if self._case_id:
+                doc_saved = sum(self._store_document(self._case_id, ft["path"], ft["text"])
+                                for ft in file_texts)
+                doc_msg = (f"\n已將 {doc_saved} 份原始文件存入資料庫，可按「📂 查看文件資料」查閱。"
+                           if doc_saved else "")
+                messagebox.showinfo(
+                    "筆錄匯入完成",
+                    f"已處理 {proc} 份文件（{err} 份失敗），筆錄原文已匯入。\n"
+                    f"未從文件中提取到錢包地址或金融帳號。{doc_msg}",
+                    parent=self)
+            else:
+                self._pending_documents.extend(file_texts)
+                self._update_pending_hint()
+                messagebox.showinfo(
+                    "筆錄匯入完成",
+                    f"已處理 {proc} 份文件（{err} 份失敗），筆錄原文已匯入。\n"
+                    "未從文件中提取到錢包地址或金融帳號。\n"
+                    "⚠ 案件尚未儲存，文件將於儲存案件後一併存入資料庫。",
+                    parent=self)
             return
 
         # ── 有提取到地址/帳戶 ──
@@ -349,11 +386,16 @@ class CaseDialog(ctk.CTkToplevel):
             else:
                 self._init_victim_panel()
             self._tabs.set("涉案錢包 / 帳戶")
+            doc_saved = sum(self._store_document(self._case_id, ft["path"], ft["text"])
+                            for ft in file_texts)
+            doc_msg = (f"\n已將 {doc_saved} 份原始文件存入資料庫，可按「📂 查看文件資料」查閱。"
+                       if doc_saved else "")
             messagebox.showinfo(
                 "筆錄匯入完成",
                 f"已處理 {proc} 份文件（{err} 份失敗）\n"
                 f"筆錄原文已匯入「筆錄內容」欄位\n"
-                f"提取 {imported} 筆涉案地址/帳戶，已顯示於「涉案錢包 / 帳戶」分頁。",
+                f"提取 {imported} 筆涉案地址/帳戶，已顯示於「涉案錢包 / 帳戶」分頁。"
+                f"{doc_msg}",
                 parent=self)
         else:
             if self._auto_save():
@@ -363,14 +405,20 @@ class CaseDialog(ctk.CTkToplevel):
                     imported += 1
                 self._init_victim_panel()
                 self._tabs.set("涉案錢包 / 帳戶")
+                doc_saved = sum(self._store_document(self._case_id, ft["path"], ft["text"])
+                                for ft in file_texts)
+                doc_msg = (f"\n已將 {doc_saved} 份原始文件存入資料庫，可按「📂 查看文件資料」查閱。"
+                           if doc_saved else "")
                 messagebox.showinfo(
                     "筆錄匯入完成",
                     f"已處理 {proc} 份文件（{err} 份失敗）\n"
                     f"案件已自動儲存\n"
-                    f"提取 {imported} 筆涉案地址/帳戶，已顯示於「涉案錢包 / 帳戶」分頁。",
+                    f"提取 {imported} 筆涉案地址/帳戶，已顯示於「涉案錢包 / 帳戶」分頁。"
+                    f"{doc_msg}",
                     parent=self)
             else:
                 self._pending_addrs = addrs
+                self._pending_documents.extend(file_texts)
                 self._update_pending_hint()
                 messagebox.showinfo(
                     "筆錄匯入完成（暫存）",
@@ -378,14 +426,19 @@ class CaseDialog(ctk.CTkToplevel):
                     f"筆錄原文已匯入「筆錄內容」欄位\n"
                     f"提取到 {len(addrs)} 筆涉案地址/帳戶。\n\n"
                     "⚠ 案件尚未儲存（請填寫案件名稱）\n"
-                    "儲存案件後地址/帳戶將自動匯入。",
+                    "儲存案件後地址/帳戶與文件將自動匯入。",
                     parent=self)
 
     def _update_pending_hint(self):
         """在涉案錢包/帳戶分頁提示列顯示暫存數量"""
+        parts = []
         if self._pending_addrs:
+            parts.append(f"{len(self._pending_addrs)} 筆地址/帳戶")
+        if self._pending_documents:
+            parts.append(f"{len(self._pending_documents)} 份文件")
+        if parts:
             self._tx_hint_lbl.configure(
-                text=f"⚠ 有 {len(self._pending_addrs)} 筆來自文件分析的地址/帳戶待匯入，請先儲存案件。",
+                text=f"⚠ 有{'、'.join(parts)}待匯入，請先儲存案件。",
                 text_color="#f5a623")
 
     # ── 填入既有資料 ──────────────────────────────────────────────────────────
@@ -474,6 +527,11 @@ class CaseDialog(ctk.CTkToplevel):
                 self._pending_addrs = []
                 self._victim_tx_panel._load()
                 pending_msg = f"\n已自動匯入 {imported} 筆文件分析地址/帳戶。"
+            if self._pending_documents:
+                doc_saved = sum(self._store_document(self._case_id, ft["path"], ft["text"])
+                                for ft in self._pending_documents)
+                self._pending_documents = []
+                pending_msg += f"\n已將 {doc_saved} 份原始文件存入資料庫。"
             messagebox.showinfo("已儲存",
                                 f"案件【{data['case_number']}】已儲存。"
                                 f"{pending_msg}\n"
@@ -486,6 +544,121 @@ class CaseDialog(ctk.CTkToplevel):
             return
         if self.on_save:
             self.on_save(result)
+
+    # ── 查看文件資料 ─────────────────────────────────────────────────────────
+
+    def _open_document_viewer(self):
+        if not self._case_id:
+            messagebox.showinfo("尚未儲存", "請先儲存案件後再查看文件資料。", parent=self)
+            return
+        _DocumentViewerWindow(self, self._case_id)
+
+
+# ── 匯入文件檢視視窗（DocumentViewerWindow）────────────────────────────────────
+
+class _DocumentViewerWindow(ctk.CTkToplevel):
+    """獨立視窗：列出案件已匯入並存檔的原始文件，可查看擷取文字或用系統開啟原始檔。"""
+
+    def __init__(self, parent, case_id: int):
+        super().__init__(parent)
+        self._case_id = case_id
+        self._docs: list[dict] = []
+        self._selected_path: str | None = None
+
+        self.title("📂 查看文件資料")
+        self.geometry("820x560")
+        self.transient(parent)
+        self.grab_set()
+        self.grid_columnconfigure(0, weight=0)
+        self.grid_columnconfigure(1, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+
+        # 左側：文件清單
+        left = ctk.CTkFrame(self, corner_radius=8, fg_color="#12192a", width=260)
+        left.grid(row=0, column=0, sticky="nsew", padx=(10, 4), pady=10)
+        left.grid_propagate(False)
+        left.grid_rowconfigure(1, weight=1)
+        ctk.CTkLabel(left, text="已匯入文件", font=("Microsoft JhengHei", 12, "bold"),
+                     text_color="#a78bfa").grid(row=0, column=0, padx=10, pady=(10, 4), sticky="w")
+        self._list_frame = ctk.CTkScrollableFrame(left, fg_color="#12192a", corner_radius=0)
+        self._list_frame.grid(row=1, column=0, sticky="nsew", padx=6, pady=(0, 8))
+
+        # 右側：詳情
+        right = ctk.CTkFrame(self, corner_radius=8, fg_color="#12192a")
+        right.grid(row=0, column=1, sticky="nsew", padx=(4, 10), pady=10)
+        right.grid_columnconfigure(0, weight=1)
+        right.grid_rowconfigure(2, weight=1)
+
+        self._name_lbl = ctk.CTkLabel(right, text="（請從左側選取一份文件）",
+                                       font=("Microsoft JhengHei", 12, "bold"),
+                                       text_color="#e2e8f0", anchor="w")
+        self._name_lbl.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 2))
+        self._meta_lbl = ctk.CTkLabel(right, text="", font=("Microsoft JhengHei", 10),
+                                       text_color="gray60", anchor="w")
+        self._meta_lbl.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 6))
+
+        self._text_box = ctk.CTkTextbox(right, font=("Microsoft JhengHei", 11), wrap="word")
+        self._text_box.grid(row=2, column=0, sticky="nsew", padx=12, pady=(0, 8))
+        self._text_box.configure(state="disabled")
+
+        btn_f = ctk.CTkFrame(right, fg_color="transparent")
+        btn_f.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 12))
+        self._open_btn = ctk.CTkButton(btn_f, text="🗂 用系統開啟原始檔案", width=170,
+                                        font=("Microsoft JhengHei", 11),
+                                        state="disabled",
+                                        command=self._open_selected_native)
+        self._open_btn.pack(side="left")
+        ctk.CTkButton(btn_f, text="關閉", width=80, fg_color="gray30",
+                      font=("Microsoft JhengHei", 11),
+                      command=self.destroy).pack(side="right")
+
+        self._load()
+
+    def _load(self):
+        self._docs = _db.get_case_documents(self._case_id)
+        for w in self._list_frame.winfo_children():
+            w.destroy()
+        if not self._docs:
+            ctk.CTkLabel(self._list_frame, text="（尚未匯入任何文件）",
+                         font=("Microsoft JhengHei", 10), text_color="gray50").pack(pady=16)
+            return
+        for doc in self._docs:
+            btn = ctk.CTkButton(
+                self._list_frame,
+                text=f"{doc.get('original_name', '')}\n{doc.get('imported_at', '')}",
+                font=("Microsoft JhengHei", 10), anchor="w",
+                fg_color="#1a2035", hover_color="#2a3556",
+                height=44,
+                command=lambda d=doc: self._show(d))
+            btn.pack(fill="x", pady=3)
+
+    def _show(self, doc: dict):
+        import os
+        self._selected_path = doc.get("stored_path")
+        self._name_lbl.configure(text=doc.get("original_name", ""))
+        exists = self._selected_path and os.path.isfile(self._selected_path)
+        status = "" if exists else "　⚠ 原始檔案不存在或已被移動"
+        self._meta_lbl.configure(
+            text=f"匯入時間：{doc.get('imported_at', '')}　格式：{doc.get('file_ext', '')}{status}")
+        self._text_box.configure(state="normal")
+        self._text_box.delete("1.0", "end")
+        self._text_box.insert("1.0", doc.get("extracted_text") or "（無擷取文字）")
+        self._text_box.configure(state="disabled")
+        self._open_btn.configure(state="normal" if exists else "disabled")
+
+    def _open_selected_native(self):
+        if not self._selected_path:
+            return
+        import os, sys, subprocess
+        try:
+            if sys.platform == "win32":
+                os.startfile(self._selected_path)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", self._selected_path])
+            else:
+                subprocess.Popen(["xdg-open", self._selected_path])
+        except Exception as e:
+            messagebox.showerror("開啟失敗", f"無法開啟檔案：\n{e}", parent=self)
 
 
 # ── 選擇案件對話框（LinkToCaseDialog，不變）────────────────────────────────────
