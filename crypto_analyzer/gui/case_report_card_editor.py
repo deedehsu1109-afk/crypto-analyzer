@@ -17,6 +17,10 @@ _SOURCE_LABELS = {
     "stated_tx":    ("陳述交易", "#f472b6"),
     "domain_scan":  ("網站溯源", "#a78bfa"),
     "image":        ("圖片卡片", "#38bdf8"),
+    "wallet_list_table":    ("電子錢包列表", "#4ade80"),
+    "flow_table":           ("幣流分析表", "#f87171"),
+    "offchain_tx_table":    ("鏈下交易匯差", "#fbbf24"),
+    "onchain_stated_table": ("鏈上交易資訊", "#22d3ee"),
 }
 
 _THUMB_MAX_SIZE = (300, 200)
@@ -204,11 +208,18 @@ class CardReportEditor(ctk.CTkToplevel):
                     padx=10, pady=(2, 4))
 
         initial_text = self._drafts.get(card["id"], card.get("text", ""))
-        tb_height = 44 if card.get("kind") == "image" else 70
-        tb = ctk.CTkTextbox(frame, font=("Microsoft JhengHei", 11), height=tb_height,
+        is_table = card.get("kind") == "table"
+        if card.get("kind") == "image":
+            tb_height = 44
+        elif is_table:
+            tb_height = max(70, min(240, 24 + 18 * (initial_text.count("\n") + 1)))
+        else:
+            tb_height = 70
+        tb = ctk.CTkTextbox(frame, font=("Consolas", 10) if is_table else ("Microsoft JhengHei", 11),
+                            height=tb_height,
                             fg_color="#0d1420" if editing else "#11182a",
                             text_color="#f1f5f9" if editing else "#8b95ab",
-                            corner_radius=6, wrap="word")
+                            corner_radius=6, wrap="none" if is_table else "word")
         tb.pack(fill="x", padx=10, pady=(2, 10))
         tb.insert("1.0", initial_text)
         if not editing:

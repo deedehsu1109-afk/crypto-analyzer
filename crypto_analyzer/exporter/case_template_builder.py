@@ -433,6 +433,14 @@ def build_case_doc_from_cards(case_info: dict, cards: list[dict], output_path: s
             if text:
                 _para(doc, text, size=9.5, color='666666',
                       align=WD_ALIGN_PARAGRAPH.CENTER, space_after=10)
+        elif card.get('kind') == 'table':
+            from exporter.report_cards import decode_table
+            headers, rows = decode_table(text)
+            if headers:
+                _add_table(doc, headers, rows)
+                doc.add_paragraph()
+            else:
+                _para(doc, '（表格內容為空）', size=9, color='CC0000')
         elif text:
             _para(doc, text, size=10.5, space_after=10)
 
