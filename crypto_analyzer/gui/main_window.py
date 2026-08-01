@@ -37,6 +37,23 @@ _STEPS = [
     ("6", "產製報告"),
 ]
 
+# ── 跨鏈橋瀏覽器清單（供人工查詢交易是否為跨鏈橋接紀錄）───────────────────────
+# 各站查詢方式（用 Hash 或地址搜尋）不同，且多為前端動態載入，本系統僅提供
+# 官方入口連結，開啟後請自行貼上要查詢的交易 Hash / 地址
+_CROSSCHAIN_BRIDGES: list[tuple[str, str]] = [
+    ("AllChain Bridge / SWFT", "https://explorer.allchainbridge.com"),
+    ("Bitget Bridge",          "https://web3.bitget.com/explorer"),
+    ("Bridgers XYZ",           "https://explorer.bridgers.xyz"),
+    ("OmniBridge",             "https://explorer.omnibridge.pro"),
+    ("Transit",                "https://explorer.transit.finance"),
+    ("THORChain",              "https://thorchain.net/dashboard"),
+    ("ChainID（鏈 ID 對照）",   "https://chainid.network"),
+    ("LayerZeroScan",          "https://layerzeroscan.com"),
+    ("HiFiSwap Browser",       "https://hifiswap.io/search"),
+    ("ButterSwap",             "https://explorer.butterswap.io"),
+    ("Relay Link",             "https://relay.link"),
+]
+
 _WELCOME_TEXT = """\
 【系統簡介】
 
@@ -1523,7 +1540,13 @@ class App(ctk.CTk):
             input_frame, text="加入幣流圖", width=90,
             font=("Microsoft JhengHei", 11), fg_color="#4a2d6a",
             command=self._add_hash_to_flow_graph).grid(
-            row=0, column=5, padx=(4, 12), pady=8)
+            row=0, column=5, padx=4, pady=8)
+
+        ctk.CTkButton(
+            input_frame, text="🌉 跨鏈橋查詢", width=110,
+            font=("Microsoft JhengHei", 11), fg_color="#2a5a6a",
+            command=self._open_bridge_explorer_list).grid(
+            row=0, column=6, padx=(4, 12), pady=8)
 
         result_frame = ctk.CTkFrame(parent, corner_radius=8)
         result_frame.grid(row=1, column=0, sticky="nsew", padx=4, pady=(0, 4))
@@ -1546,6 +1569,61 @@ class App(ctk.CTk):
         self._hash_token_tree = self._make_treeview(
             token_frame, ("Token", "從", "至", "金額", "合約"))
         self._hash_token_tree.grid(row=1, column=0, sticky="nsew")
+
+    # ── 跨鏈橋瀏覽器清單 ─────────────────────────────────────────────────────
+
+    def _open_bridge_explorer_list(self):
+        win = ctk.CTkToplevel(self)
+        win.title("🌉 跨鏈橋瀏覽器清單")
+        win.geometry("520x520")
+        win.transient(self)
+        win.grab_set()
+        win.grid_columnconfigure(0, weight=1)
+        win.grid_rowconfigure(1, weight=1)
+
+        cur_hash = self.hash_entry.get().strip() if hasattr(self, "hash_entry") else ""
+
+        hdr = ctk.CTkFrame(win, fg_color="transparent")
+        hdr.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 4))
+        hdr.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            hdr,
+            text="用於人工比對可疑交易是否為跨鏈橋接紀錄。\n"
+                 "各站查詢方式不同、多為前端動態載入，本系統僅提供官方入口連結，\n"
+                 "開啟後請自行貼上要查詢的交易 Hash 或地址。",
+            font=("Microsoft JhengHei", 10), text_color="gray60",
+            justify="left", anchor="w").grid(row=0, column=0, sticky="w")
+        if cur_hash:
+            ctk.CTkButton(
+                hdr, text="📋 複製目前查詢 Hash", width=150, height=26,
+                font=("Microsoft JhengHei", 10),
+                command=lambda: (self.clipboard_clear(),
+                                 self.clipboard_append(cur_hash))).grid(
+                row=1, column=0, sticky="w", pady=(8, 0))
+
+        list_frame = ctk.CTkScrollableFrame(win, corner_radius=8)
+        list_frame.grid(row=1, column=0, sticky="nsew", padx=12, pady=(8, 12))
+        list_frame.grid_columnconfigure(1, weight=1)
+
+        for i, (name, url) in enumerate(_CROSSCHAIN_BRIDGES):
+            row = ctk.CTkFrame(list_frame, fg_color="#1a2035", corner_radius=6)
+            row.grid(row=i, column=0, columnspan=2, sticky="ew", padx=2, pady=3)
+            row.grid_columnconfigure(0, weight=1)
+            ctk.CTkLabel(row, text=name, font=("Microsoft JhengHei", 11, "bold"),
+                         text_color="#e2e8f0", anchor="w").grid(
+                row=0, column=0, sticky="w", padx=(10, 4), pady=(6, 0))
+            url_lbl = ctk.CTkLabel(row, text=url, font=("Consolas", 9),
+                                    text_color="#4da6ff", cursor="hand2", anchor="w")
+            url_lbl.grid(row=1, column=0, sticky="w", padx=(10, 4), pady=(0, 6))
+            url_lbl.bind("<Button-1>", lambda _, u=url: webbrowser.open(u))
+            ctk.CTkButton(row, text="開啟", width=60, height=26,
+                          font=("Microsoft JhengHei", 10), fg_color="#1f538d",
+                          command=lambda u=url: webbrowser.open(u)).grid(
+                row=0, column=1, rowspan=2, padx=8, pady=6)
+
+        ctk.CTkButton(win, text="關閉", width=90, fg_color="gray30",
+                      font=("Microsoft JhengHei", 11),
+                      command=win.destroy).grid(row=2, column=0, pady=(0, 12))
 
     # ── 涉案錢包/帳戶分頁 ────────────────────────────────────────────────────
 
