@@ -22,6 +22,7 @@ from gui.case_window import CaseDialog, LinkToCaseDialog
 from gui.case_address_panel import CaseAddressPanel, AddressDialog
 from gui.flow_graph_panel import FlowGraphPanel
 from gui.cloudfail_panel import CloudFailPanel
+from gui.crosschain_panel import CrossChainTracePanel
 from gui.manual_dialog import ManualDialog
 from api import update_checker
 
@@ -863,13 +864,14 @@ class App(ctk.CTk):
         # ── 右側：功能分頁 ──
         tabs = ctk.CTkTabview(page, corner_radius=8)
         tabs.grid(row=0, column=1, sticky="nsew", padx=(0, 8), pady=8)
-        for name in ["🔍  地址側寫", "🔗  Hash 分析", "📁  涉案錢包/帳戶",
-                      "📜  查詢歷史", "🌐  網站溯源"]:
+        for name in ["🔍  地址側寫", "🔗  Hash 分析", "🌉  跨鏈追蹤",
+                      "📁  涉案錢包/帳戶", "📜  查詢歷史", "🌐  網站溯源"]:
             tabs.add(name)
         self._data_tabs = tabs
 
         self._build_profile_tab(tabs.tab("🔍  地址側寫"))
         self._build_hash_tab(tabs.tab("🔗  Hash 分析"))
+        self._build_crosschain_tab(tabs.tab("🌉  跨鏈追蹤"))
         self._build_addr_tab(tabs.tab("📁  涉案錢包/帳戶"))
         self._build_history_tab(tabs.tab("📜  查詢歷史"))
         self._build_cloudfail_tab(tabs.tab("🌐  網站溯源"))
@@ -1624,6 +1626,40 @@ class App(ctk.CTk):
         ctk.CTkButton(win, text="關閉", width=90, fg_color="gray30",
                       font=("Microsoft JhengHei", 11),
                       command=win.destroy).grid(row=2, column=0, pady=(0, 12))
+
+    # ── 跨鏈追蹤分頁 ──────────────────────────────────────────────────────────
+
+    def _build_crosschain_tab(self, parent: ctk.CTkFrame):
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_rowconfigure(0, weight=1)
+
+        def _get_case_id() -> int | None:
+            return self._active_case["id"] if self._active_case else None
+
+        def _get_case_name() -> str:
+            if self._active_case:
+                return f"{self._active_case['case_number']} {self._active_case['case_name']}"
+            return "（未選擇案件）"
+
+        def _get_api_keys() -> dict:
+            return {
+                "etherscan_api_key": self.config_data.get("etherscan_api_key", ""),
+                "trongrid_api_key": self.config_data.get("trongrid_api_key", ""),
+            }
+
+        def _get_last_hash_result() -> dict | None:
+            return getattr(self, "_last_hash_result", None)
+
+        self._crosschain_panel = CrossChainTracePanel(
+            parent,
+            get_case_id=_get_case_id,
+            get_case_name=_get_case_name,
+            get_api_keys=_get_api_keys,
+            get_last_hash_result=_get_last_hash_result,
+            corner_radius=0,
+            fg_color="transparent",
+        )
+        self._crosschain_panel.grid(row=0, column=0, sticky="nsew")
 
     # ── 涉案錢包/帳戶分頁 ────────────────────────────────────────────────────
 

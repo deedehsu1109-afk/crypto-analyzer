@@ -190,13 +190,15 @@ def analyze_trx_tx(raw: dict) -> dict:
 
     token_rows = []
     for t in tokens:
+        # 欄位對應 trc20TransferInfo（來自 transaction-info API 內建陣列）的格式：
+        # name/symbol/decimals/amount_str，而非 token_trc20/transfers 端點的欄位名稱。
         try:
-            decimals = int(t.get("tokenDecimal", 6) or 6)
-            amount = int(t.get("amount", 0)) / (10 ** decimals)
+            decimals = int(t.get("decimals", 6) or 6)
+            amount = int(t.get("amount_str", 0)) / (10 ** decimals)
         except (ValueError, TypeError):
             amount = 0
         token_rows.append({
-            "Token":    f"{t.get('tokenName','')} ({t.get('tokenAbbr','')})",
+            "Token":    f"{t.get('name','')} ({t.get('symbol','')})",
             "從":       t.get("from_address", ""),
             "至":       t.get("to_address", ""),
             "金額":     f"{amount:,.6f}",

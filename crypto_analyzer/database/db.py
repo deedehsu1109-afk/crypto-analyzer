@@ -136,6 +136,27 @@ def init_db():
             updated_at    TEXT DEFAULT (datetime('now','localtime'))
         );
 
+        -- ── 跨鏈交易追蹤 ──────────────────────────────────────────────────────
+        CREATE TABLE IF NOT EXISTS crosschain_traces (
+            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id            INTEGER REFERENCES cases(id) ON DELETE SET NULL,
+            dest_chain         TEXT NOT NULL,
+            dest_tx_hash       TEXT NOT NULL,
+            confidence         TEXT,              -- HIGH / MEDIUM / NONE
+            pool_side          TEXT,              -- 發送方 / 接收方
+            pool_address       TEXT,
+            matched_bridge     TEXT,
+            detection_evidence TEXT,               -- JSON
+            origin_chain       TEXT,
+            origin_tx_hash     TEXT,
+            origin_sender      TEXT,
+            verify_result      TEXT,               -- JSON
+            method_log         TEXT,               -- JSON 陣列
+            investigator       TEXT,
+            created_at         TEXT DEFAULT (datetime('now','localtime')),
+            UNIQUE(dest_chain, dest_tx_hash)
+        );
+
         -- ── 索引 ──────────────────────────────────────────────────────────────
         -- ── 幣流圖快照（證據模式用）────────────────────────────────────────────
         CREATE TABLE IF NOT EXISTS graph_snapshots (
@@ -1206,6 +1227,94 @@ def get_domain_scan_result(scan_id: int) -> dict | None:
         except Exception:
             pass
     return None
+
+
+# ── 跨鏈交易追蹤 ──────────────────────────────────────────────────────────────
+
+def save_crosschain_trace(data: dict, case_id: int = None) -> int:
+    """儲存／更新一筆跨鏈追蹤紀錄（依 dest_chain+dest_tx_hash 判斷是否已存在）。"""
+    with _conn() as con:
+        cur = con.execute("""
+            INSERT INTO crosschain_traces
+                (case_id, dest_chain, dest_tx_hash, confidence, pool_side,
+                 pool_address, matched_bridge, detection_evidence,
+                 origin_chain, origin_tx_hash, origin_sender, verify_result,
+                 method_log, investigator)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(dest_chain, dest_tx_hash) DO UPDATE SET
+                case_id            = COALESCE(excluded.case_id, case_id),
+                confidence         = excluded.confidence,
+                pool_side          = excluded.pool_side,
+                pool_address       = excluded.pool_address,
+                matched_bridge     = excluded.matched_bridge,
+                detection_evidence = excluded.detection_evidence,
+                origin_chain       = excluded.origin_chain,
+                origin_tx_hash     = excluded.origin_tx_hash,
+                origin_sender      = excluded.origin_sender,
+                verify_result      = excluded.verify_result,
+                method_log         = excluded.method_log,
+                investigator       = excluded.investigator
+        """, (
+            case_id, data.get("dest_chain", ""), data.get("dest_tx_hash", ""),
+            data.get("confidence"), data.get("pool_side"), data.get("pool_address"),
+            data.get("matched_bridge"),
+            json.dumps(data.get("detection_evidence"), ensure_ascii=False) if data.get("detection_evidence") is not None else None,
+            data.get("origin_chain"), data.get("origin_tx_hash"), data.get("origin_sender"),
+            json.dumps(data.get("verify_result"), ensure_ascii=False) if data.get("verify_result") is not None else None,
+            json.dumps(data.get("method_log", []), ensure_ascii=False),
+            data.get("investigator"),
+        ))
+        if cur.lastrowid:
+            return cur.lastrowid
+        row = con.execute(
+            "SELECT id FROM crosschain_traces WHERE dest_chain=? AND dest_tx_hash=?",
+            (data.get("dest_chain", ""), data.get("dest_tx_hash", "")),
+        ).fetchone()
+        return row["id"] if row else 0
+
+
+def get_crosschain_traces(case_id: int = None) -> list[dict]:
+    """讀取跨鏈追蹤紀錄摘要清單，不含完整 JSON 欄位。case_id 為 None 時回傳全部。"""
+    with _conn() as con:
+        if case_id is None:
+            rows = con.execute("""
+                SELECT id, case_id, dest_chain, dest_tx_hash, confidence,
+                       pool_side, pool_address, matched_bridge,
+                       origin_chain, origin_tx_hash, origin_sender, created_at
+                FROM crosschain_traces ORDER BY created_at DESC
+            """).fetchall()
+        else:
+            rows = con.execute("""
+                SELECT id, case_id, dest_chain, dest_tx_hash, confidence,
+                       pool_side, pool_address, matched_bridge,
+                       origin_chain, origin_tx_hash, origin_sender, created_at
+                FROM crosschain_traces WHERE case_id=? ORDER BY created_at DESC
+            """, (case_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_crosschain_trace(dest_chain: str, dest_tx_hash: str) -> dict | None:
+    """讀取單筆跨鏈追蹤紀錄的完整內容（含 JSON 欄位）。"""
+    with _conn() as con:
+        row = con.execute(
+            "SELECT * FROM crosschain_traces WHERE dest_chain=? AND dest_tx_hash=?",
+            (dest_chain, dest_tx_hash),
+        ).fetchone()
+    if not row:
+        return None
+    result = dict(row)
+    for key in ("detection_evidence", "verify_result", "method_log"):
+        if result.get(key):
+            try:
+                result[key] = json.loads(result[key])
+            except Exception:
+                pass
+    return result
+
+
+def delete_crosschain_trace(trace_id: int):
+    with _conn() as con:
+        con.execute("DELETE FROM crosschain_traces WHERE id=?", (trace_id,))
 
 
 # ── 案件分析報告：圖片卡片 ────────────────────────────────────────────────────

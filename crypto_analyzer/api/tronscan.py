@@ -144,9 +144,10 @@ class TronScanAPI:
     def get_transaction(self, tx_hash: str) -> dict:
         """抓取單筆 TRX 交易詳情"""
         tx = self._get("transaction-info", {"hash": tx_hash})
-        # TRC-20 轉帳
-        token_data = self._get("token_trc20/transfers", {
-            "txHash": tx_hash, "limit": 50,
-        })
-        token_transfers = token_data.get("token_transfers", [])
+        # TRC-20 轉帳：transaction-info 本身已內建 trc20TransferInfo，
+        # 且只含這筆交易的轉帳事件。
+        # 注意：先前這裡改呼叫獨立的 token_trc20/transfers?txHash= 端點，
+        # 但該端點不支援用交易 Hash 篩選（txHash / transaction_id 皆會被忽略），
+        # 實際會回傳全站最新的轉帳紀錄，導致抓到完全不相關的資料。
+        token_transfers = tx.get("trc20TransferInfo", [])
         return {"tx": tx, "token_transfers": token_transfers}
