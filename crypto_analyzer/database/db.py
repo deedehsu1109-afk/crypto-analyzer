@@ -247,7 +247,8 @@ def init_db():
             amount              REAL,
             currency            TEXT,           -- TWD/USD 或 USDT/TRX/ETH 等，自由輸入
             counterpart_desc    TEXT,           -- 對象描述，如「自稱OKX幣商 LINE ID:xxx」
-            bank_name           TEXT,           -- 銀行名稱（銀行轉帳/現金交易時可能有）
+            bank_name           TEXT,           -- 我方銀行名稱（銀行轉帳/現金交易時可能有）
+            counterpart_bank_name TEXT,         -- 對方銀行名稱
             account_no          TEXT,           -- 我方帳號
             counterpart_account TEXT,           -- 對方帳號
             chain               TEXT,           -- TRX/ETH/BTC…（區塊鏈相關時填寫）
@@ -319,6 +320,10 @@ def _migrate(con: sqlite3.Connection):
     existing_gs = {r[1] for r in con.execute("PRAGMA table_info(graph_snapshots)").fetchall()}
     if "pos_json" not in existing_gs:
         con.execute("ALTER TABLE graph_snapshots ADD COLUMN pos_json TEXT DEFAULT '{}'")
+    # case_stated_transactions 加入對方銀行名稱欄位（銀行名稱比照帳號分我方/對方）
+    existing_st = {r[1] for r in con.execute("PRAGMA table_info(case_stated_transactions)").fetchall()}
+    if "counterpart_bank_name" not in existing_st:
+        con.execute("ALTER TABLE case_stated_transactions ADD COLUMN counterpart_bank_name TEXT")
     # case_id 欄位存在後才能建索引
     con.execute("CREATE INDEX IF NOT EXISTS idx_wallets_case ON wallets(case_id)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_lookups_case ON tx_lookups(case_id)")
@@ -1045,10 +1050,25 @@ def get_stated_transactions(case_id: int) -> list[dict]:
 
 _STATED_TX_FIELDS = [
     "method", "direction", "time_precision", "tx_date", "tx_time", "time_desc",
-    "amount", "currency", "counterpart_desc", "bank_name", "account_no",
-    "counterpart_account", "chain", "tx_hash", "from_addr", "to_addr",
+    "amount", "currency", "counterpart_desc", "bank_name", "counterpart_bank_name",
+    "account_no", "counterpart_account", "chain", "tx_hash", "from_addr", "to_addr",
     "notes", "source_doc",
 ]
+
+
+def get_case_bank_names(case_id: int) -> list[str]:
+    """取得此案件曾填入過的所有銀行名稱（我方＋對方合併去重），供下拉選單建議使用。"""
+    with _conn() as con:
+        rows = con.execute(
+            "SELECT bank_name AS name FROM case_stated_transactions "
+            "WHERE case_id=? AND bank_name IS NOT NULL AND bank_name != '' "
+            "UNION "
+            "SELECT counterpart_bank_name AS name FROM case_stated_transactions "
+            "WHERE case_id=? AND counterpart_bank_name IS NOT NULL AND counterpart_bank_name != '' "
+            "ORDER BY name",
+            (case_id, case_id)
+        ).fetchall()
+    return [r["name"] for r in rows]
 
 
 def upsert_stated_transaction(case_id: int, data: dict) -> int:

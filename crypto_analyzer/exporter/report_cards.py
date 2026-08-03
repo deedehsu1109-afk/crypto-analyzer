@@ -144,10 +144,12 @@ def stated_tx_to_card(row: dict) -> dict:
     )
     if row.get("counterpart_desc"):
         text += f" 對象：{row['counterpart_desc']}。"
-    if row.get("bank_name") or row.get("account_no") or row.get("counterpart_account"):
-        text += (f" 銀行資訊：{row.get('bank_name') or ''} "
-                  f"我方帳號 {row.get('account_no') or '—'}，"
-                  f"對方帳號 {row.get('counterpart_account') or '—'}。")
+    if (row.get("bank_name") or row.get("counterpart_bank_name")
+            or row.get("account_no") or row.get("counterpart_account")):
+        text += (f" 銀行資訊：我方 {row.get('bank_name') or '—'} "
+                  f"帳號 {row.get('account_no') or '—'}，"
+                  f"對方 {row.get('counterpart_bank_name') or '—'} "
+                  f"帳號 {row.get('counterpart_account') or '—'}。")
     if row.get("chain") or row.get("tx_hash"):
         text += (f" 區塊鏈資訊：{row.get('chain') or ''} "
                   f"Hash：{row.get('tx_hash') or '—'}，"
@@ -247,7 +249,8 @@ def offchain_tx_table_card(case_id: int) -> dict | None:
     rows_src = _db.get_stated_transactions(case_id)
     if not rows_src:
         return None
-    headers = ["陳述方式", "方向", "時間", "金額", "幣別", "對象描述", "我方帳號", "對方帳號"]
+    headers = ["陳述方式", "方向", "時間", "金額", "幣別", "對象描述",
+               "我方銀行", "我方帳號", "對方銀行", "對方帳號"]
     rows = []
     for r in rows_src:
         when = r.get("tx_date") or r.get("time_desc") or ""
@@ -257,7 +260,8 @@ def offchain_tx_table_card(case_id: int) -> dict | None:
             r.get("method") or "不明", r.get("direction") or "不明", when,
             r.get("amount") if r.get("amount") is not None else "",
             r.get("currency") or "", r.get("counterpart_desc") or "",
-            r.get("account_no") or "", r.get("counterpart_account") or "",
+            r.get("bank_name") or "", r.get("account_no") or "",
+            r.get("counterpart_bank_name") or "", r.get("counterpart_account") or "",
         ])
     return _table_card("offchain_tx_table", case_id, "鏈下交易明細匯差表", headers, rows)
 

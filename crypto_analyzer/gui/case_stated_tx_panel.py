@@ -32,7 +32,8 @@ _COLS = [
     ("金額",       "amount",            90),
     ("幣別/幣種",  "currency",          70),
     ("對象描述",   "counterpart_desc", 160),
-    ("銀行",       "bank_name",        100),
+    ("我方銀行",   "bank_name",        100),
+    ("對方銀行",   "counterpart_bank_name", 100),
     ("鏈別",       "chain",             60),
     ("交易Hash",   "tx_hash",          140),
     ("備註",       "notes",            160),
@@ -152,7 +153,16 @@ class StatedTxDialog(ctk.CTkToplevel):
 
         # ── 銀行資訊（可留白） ──────────────────────────────────────────────
         self._section(scroll, "銀行資訊（若涉及銀行轉帳/現金交易，可留白）")
-        self._bank_e  = self._row(scroll, "銀行名稱", self._entry(scroll, "如：玉山銀行（808）"))
+        bank_names = _db.get_case_bank_names(self.case_id)
+        self._bank_var  = tk.StringVar(value="")
+        self._row(scroll, "我方銀行名稱", lambda f: ctk.CTkComboBox(
+            f, values=bank_names, variable=self._bank_var,
+            font=("Consolas", 11), width=280),
+            hint="可下拉選擇本案曾填過的銀行，或直接輸入新名稱")
+        self._cbank_var = tk.StringVar(value="")
+        self._row(scroll, "對方銀行名稱", lambda f: ctk.CTkComboBox(
+            f, values=bank_names, variable=self._cbank_var,
+            font=("Consolas", 11), width=280))
         self._acc_e   = self._row(scroll, "我方帳號", self._entry(scroll, "", 300))
         self._cacc_e  = self._row(scroll, "對方帳號", self._entry(scroll, "", 300))
 
@@ -198,7 +208,8 @@ class StatedTxDialog(ctk.CTkToplevel):
             self._amt_e.insert(0, str(amt))
         self._cur_var.set(row.get("currency") or _CURRENCIES[0])
         _set(self._cpdesc_e, "counterpart_desc")
-        _set(self._bank_e, "bank_name")
+        self._bank_var.set(row.get("bank_name") or "")
+        self._cbank_var.set(row.get("counterpart_bank_name") or "")
         _set(self._acc_e, "account_no")
         _set(self._cacc_e, "counterpart_account")
         self._chain_var.set(row.get("chain") or "")
@@ -226,7 +237,8 @@ class StatedTxDialog(ctk.CTkToplevel):
             "amount":              amount,
             "currency":            self._cur_var.get(),
             "counterpart_desc":    self._cpdesc_e.get().strip(),
-            "bank_name":           self._bank_e.get().strip(),
+            "bank_name":           self._bank_var.get().strip(),
+            "counterpart_bank_name": self._cbank_var.get().strip(),
             "account_no":          self._acc_e.get().strip(),
             "counterpart_account": self._cacc_e.get().strip(),
             "chain":               self._chain_var.get().strip(),
