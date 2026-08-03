@@ -1256,7 +1256,7 @@ class App(ctk.CTk):
         r0 = ctk.CTkFrame(filter_bar, fg_color="transparent")
         r0.grid(row=0, column=0, sticky="w", padx=0, pady=(4, 0))
         self._dust_cb = ctk.CTkCheckBox(
-            r0, text="🚫 過濾釣魚交易（數量 ＜ 1）",
+            r0, text="🚫 過濾釣魚交易（數量 ＜ 1／垃圾空投幣）",
             font=("Microsoft JhengHei", 11),
             variable=self._dust_filter_var,
             command=self._on_dust_filter_change,
@@ -3280,6 +3280,7 @@ class App(ctk.CTk):
                     "發送方":        t.get("from", ""),
                     "接收方":        t.get("to",   ""),
                     "代幣":          t.get("tokenSymbol", "—"),
+                    "代幣全名":      t.get("tokenName", ""),
                     "數量":          amt,
                 })
 
@@ -3311,6 +3312,7 @@ class App(ctk.CTk):
                     "發送方":        t.get("from_address", ""),
                     "接收方":        t.get("to_address",   ""),
                     "代幣":          ti.get("tokenAbbr", "—"),
+                    "代幣全名":      ti.get("tokenName", ""),
                     "數量":          amt,
                 })
 
@@ -3355,17 +3357,30 @@ class App(ctk.CTk):
 
     # ── dust / search / sort helpers ─────────────────────────────────────────
 
+    # 垃圾/釣魚空投幣的網域片段特徵：正常代幣代號或全名不會出現這些字串
+    _SPAM_TOKEN_DOMAIN_HINTS = (
+        ".com", ".io", ".net", ".xyz", ".org", ".finance", ".app",
+        "t.me", "http://", "https://", "www.",
+    )
+
     def _dust_filter_rows(self, tx_rows: list[dict], token_rows: list[dict]):
         """套用釣魚交易過濾，回傳 (tx_rows, token_rows, filtered_count)。"""
         if not (getattr(self, "_dust_filter_var", None) and self._dust_filter_var.get()):
             return tx_rows, token_rows, 0
 
         def _keep(row: dict) -> bool:
+            token      = row.get("代幣", "") or ""
+            token_name = row.get("代幣全名", "") or ""
+            # 正常代幣代號不會有空格；代號/全名含網域片段者，判定為垃圾空投幣
+            if " " in token:
+                return False
+            combined = f"{token} {token_name}".lower()
+            if any(hint in combined for hint in self._SPAM_TOKEN_DOMAIN_HINTS):
+                return False
             try:
                 amt = float(row.get("數量", "0") or 0)
             except (ValueError, TypeError):
                 return True
-            token = row.get("代幣", "")
             if token == "ETH":
                 threshold = 0.001
             elif token == "BTC":
