@@ -656,7 +656,8 @@ class FlowGraphPanel(ctk.CTkFrame):
                 self._wp_hit_list.append((key, i, (wx, wy)))
 
         # 邊標籤：每筆交易固定2行（時間＋數量＋幣種 / tx hash），固定像素間距
-        _EL_H   = 11   # 每行高度（points，不隨縮放改變）
+        _EL_H   = 12   # 同一筆交易內兩行的間距（points，不隨縮放改變）
+        _EL_GAP = 7    # 不同交易之間的額外間距（points），確保視覺上明顯分列
         _EL_MAX = 5    # 每條邊最多顯示幾筆，超過則補截斷說明
 
         # 按 (source, target) 分組 _state.edges
@@ -675,15 +676,26 @@ class FlowGraphPanel(ctk.CTkFrame):
                 [self._pos_network[_eu], *self._edge_waypoints.get((_eu, _ev), []),
                  self._pos_network[_ev]])
 
-            _show  = _txs[:_EL_MAX]
-            _extra = len(_txs) - len(_show)
+            # 依時間排序，確保多筆交易由上往下依序排列
+            _txs_sorted = sorted(_txs, key=lambda e: e.tx_time or "")
+            _show  = _txs_sorted[:_EL_MAX]
+            _extra = len(_txs_sorted) - len(_show)
 
-            # 總行數：每筆 2 行，截斷提示再 +1
-            _n_lines = len(_show) * 2 + (1 if _extra else 0)
+            # 逐行計算 y 位移：同一筆交易的兩行用 _EL_H，交易之間額外多空 _EL_GAP
+            _ys: list[float] = []
+            _cursor = 0.0
+            for _i in range(len(_show)):
+                _ys.append(_cursor); _cursor -= _EL_H   # 行 1：時間+金額
+                _ys.append(_cursor); _cursor -= _EL_H   # 行 2：tx hash
+                if _i < len(_show) - 1 or _extra:
+                    _cursor -= _EL_GAP
+            if _extra:
+                _ys.append(_cursor)                     # 截斷提示行
 
-            # 最上行 y offset，使整個標籤塊垂直置中於邊中點
-            _y0  = (_n_lines - 1) * _EL_H / 2.0
-            _row = 0
+            # 置中：讓整個標籤塊上下對稱於邊中點
+            _center_shift = (_ys[0] + _ys[-1]) / 2.0
+            _ys = [y - _center_shift for y in _ys]
+            _yi = iter(_ys)
 
             for _tx in _show:
                 # 行 1：時間  數量 幣種
@@ -692,7 +704,7 @@ class FlowGraphPanel(ctk.CTkFrame):
 
                 _tr1 = mtransforms.offset_copy(
                     self._ax.transData, fig=self._fig,
-                    x=0, y=_y0 - _row * _EL_H, units="points")
+                    x=0, y=next(_yi), units="points")
                 self._ax.text(
                     _mx, _my, _line1,
                     transform=_tr1, fontsize=6, color="#cccccc",
@@ -702,12 +714,11 @@ class FlowGraphPanel(ctk.CTkFrame):
                               linewidth=0.4, alpha=0.88, pad=1.5,
                               boxstyle="round,pad=0.2"),
                     clip_on=True, zorder=3)
-                _row += 1
 
                 # 行 2：完整 tx hash
                 _tr2 = mtransforms.offset_copy(
                     self._ax.transData, fig=self._fig,
-                    x=0, y=_y0 - _row * _EL_H, units="points")
+                    x=0, y=next(_yi), units="points")
                 self._ax.text(
                     _mx, _my, _tx.tx_hash or "—",
                     transform=_tr2, fontsize=5, color="#7a9cc0",
@@ -717,12 +728,11 @@ class FlowGraphPanel(ctk.CTkFrame):
                               alpha=0.82, pad=1.0,
                               boxstyle="square,pad=0.15"),
                     clip_on=True, zorder=3)
-                _row += 1
 
             if _extra:
                 _trx = mtransforms.offset_copy(
                     self._ax.transData, fig=self._fig,
-                    x=0, y=_y0 - _row * _EL_H, units="points")
+                    x=0, y=next(_yi), units="points")
                 self._ax.text(
                     _mx, _my, f"…另 {_extra} 筆",
                     transform=_trx, fontsize=5, color="#888888",
