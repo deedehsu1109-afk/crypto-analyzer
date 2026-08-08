@@ -948,8 +948,9 @@ class FlowGraphPanel(ctk.CTkFrame):
         return keyed, extra, total_slots
 
     def _fan_offset_point(self, u: str, v: str, idx: int, total: int) -> tuple:
-        """計算節點 u→v 之間第 idx/total 筆交易的「尖錐狀」分列中點：
-        兩端仍收攏於節點本身，中段依交易筆數自動分開角度。
+        """計算節點 u→v 之間第 idx/total 筆交易的分列彎折點：
+        兩端仍收攏於節點本身，所有交易往「同一側」堆疊彎曲（依時間順序由內而外，
+        像彩虹一樣層層展開），而非上下對稱分開。
         間距以螢幕像素（而非資料座標）計算，確保縮放/邊長不同時分列間距一致。"""
         ux, uy = self._pos_network[u]
         vx, vy = self._pos_network[v]
@@ -966,8 +967,9 @@ class FlowGraphPanel(ctk.CTkFrame):
             return (mx, my)
 
         perp_x, perp_y = -ddy / dlen, ddx / dlen
-        spacing_px = 34.0   # 每筆交易之間的像素間距，需容納時間+金額/hash 兩行標籤
-        level = idx - (total - 1) / 2.0
+        spacing_px = 30.0   # 每筆交易之間的像素間距，需容納時間+金額/hash 兩行標籤
+        # 同向堆疊：idx 0（最早）彎曲幅度最小（最內層），依序往外層層展開
+        level = idx + 1
         offset_px = level * spacing_px
 
         disp_target = (disp_m[0] + perp_x * offset_px, disp_m[1] + perp_y * offset_px)
