@@ -1719,8 +1719,15 @@ class FlowGraphPanel(ctk.CTkFrame):
             idx   = pair_idx.get(key, 0)
             pair_idx[key] = idx + 1
 
-            # 多邊時展開弧度
-            rad = 0.12 + (idx - total / 2) * 0.10
+            if total > 1:
+                # 同一對節點有多筆交易時，依時間順序由上往下分層排列
+                # （idx 0 = 最早的一筆，level 最大 → 排最上層；依序往下）
+                level        = (total - 1) / 2 - idx
+                rad          = 0.10 + level * 0.09
+                label_offset = 0.032 + level * 0.050
+            else:
+                rad          = 0.12
+                label_offset = rad * 0.28
 
             src_color = self._state.nodes.get(
                 e.source, NodeInfo(e.source, "ETH")).color
@@ -1733,7 +1740,7 @@ class FlowGraphPanel(ctk.CTkFrame):
 
             # 邊標籤：時間 + 金額
             mid_x = (sp[0] + tp[0]) / 2
-            mid_y = (sp[1] + tp[1]) / 2 + rad * 0.28
+            mid_y = (sp[1] + tp[1]) / 2 + label_offset
             ts    = self._fmt_ts(e.tx_time)
             label = f"{ts}\n{e.amount_display}" if ts else e.amount_display
 
