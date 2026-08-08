@@ -62,7 +62,7 @@ class FlowGraphPanel(ctk.CTkFrame):
         self._mpl_canvas: FigureCanvasTkAgg | None = None
         self._pos_network: dict = {}   # 地址關係圖佈局快取（spring layout）
         self._pos_maltego: dict = {}   # 司法金流圖佈局快取（BFS 階層）
-        self._edge_waypoints: dict = {}   # 地址關係圖邊折點 {(from,to): [(x,y), ...]}
+        self._edge_waypoints: dict = {}   # 地址關係圖邊折點 {(from,to,tx_key): [(x,y), ...]}，每筆交易各自獨立
         self._selected_node:  str | None = None
         # 拖曳 / 複選狀態
         self._selected_nodes: set       = set()
@@ -566,11 +566,6 @@ class FlowGraphPanel(ctk.CTkFrame):
         colors  = [G.nodes[n].get("color", "#AAAAAA") for n in G.nodes]
         labels  = {n: G.nodes[n].get("display_label", n[:8]) for n in G.nodes}
 
-        # 邊寬度依交易數量縮放
-        edge_widths = []
-        for u, v, d in G.edges(data=True):
-            edge_widths.append(max(0.5, min(4.0, d.get("tx_count", 1) * 0.4)))
-
         # 複選高亮：先畫較大的白色圓環（當作外框）
         sel_in_g = [n for n in self._selected_nodes if n in G.nodes]
         if sel_in_g:
@@ -635,94 +630,65 @@ class FlowGraphPanel(ctk.CTkFrame):
                         zorder=4,
                     )
 
-        # 邊：直線（可能經過使用者新增的折點），取代原本固定弧度的 nx.draw_networkx_edges
+        # 邊：同一對節點間每筆交易各自畫一條「尖錐狀」分列線條（於節點處收攏、
+        # 中段依交易筆數自動分開角度），標籤跟著自己的線走，取代原本單一聚合線。
         self._wp_hit_list = []
-        for (u, v, d), lw in zip(G.edges(data=True), edge_widths):
-            if u not in self._pos_network or v not in self._pos_network:
-                continue
-            key = (u, v)
-            wpts = self._edge_waypoints.get(key, [])
-            verts = [self._pos_network[u], *wpts, self._pos_network[v]]
-            arrow = mpatches.FancyArrowPatch(
-                path=Path(verts), arrowstyle="-|>", mutation_scale=15,
-                color="#4a6fa5", linewidth=lw,
-                shrinkA=18, shrinkB=18, zorder=1,
-            )
-            self._ax.add_patch(arrow)
-            for i, (wx, wy) in enumerate(wpts):
-                self._ax.plot(wx, wy, marker="D", markersize=5,
-                              color="#f5a623", markeredgecolor="#1a1a2e",
-                              markeredgewidth=0.8, zorder=2)
-                self._wp_hit_list.append((key, i, (wx, wy)))
-
-        # 邊標籤：每筆交易固定2行（時間＋數量＋幣種 / tx hash），固定像素間距
-        _EL_H   = 12   # 同一筆交易內兩行的間距（points，不隨縮放改變）
-        _EL_GAP = 7    # 不同交易之間的額外間距（points），確保視覺上明顯分列
-        _EL_MAX = 5    # 每條邊最多顯示幾筆，超過則補截斷說明
-
-        # 按 (source, target) 分組 _state.edges
         _edge_grp: dict[tuple, list] = {}
         for _ei in self._state.edges:
-            _k = (_ei.source, _ei.target)
-            if _k not in _edge_grp:
-                _edge_grp[_k] = []
-            _edge_grp[_k].append(_ei)
+            _edge_grp.setdefault((_ei.source, _ei.target), []).append(_ei)
 
         for (_eu, _ev), _txs in _edge_grp.items():
             if _eu not in self._pos_network or _ev not in self._pos_network:
                 continue
-            # 邊中點：沿折線路徑（含折點）以弧長置中，而非單純頭尾幾何中點
-            _mx, _my = self._polyline_midpoint(
-                [self._pos_network[_eu], *self._edge_waypoints.get((_eu, _ev), []),
-                 self._pos_network[_ev]])
 
-            # 依時間排序，確保多筆交易由上往下依序排列
-            _txs_sorted = sorted(_txs, key=lambda e: e.tx_time or "")
-            _show  = _txs_sorted[:_EL_MAX]
-            _extra = len(_txs_sorted) - len(_show)
+            _keyed, _extra, _total_slots = self._grouped_pair_transactions(_txs)
 
-            # 逐行計算 y 位移：同一筆交易的兩行用 _EL_H，交易之間額外多空 _EL_GAP
-            _ys: list[float] = []
-            _cursor = 0.0
-            for _i in range(len(_show)):
-                _ys.append(_cursor); _cursor -= _EL_H   # 行 1：時間+金額
-                _ys.append(_cursor); _cursor -= _EL_H   # 行 2：tx hash
-                if _i < len(_show) - 1 or _extra:
-                    _cursor -= _EL_GAP
-            if _extra:
-                _ys.append(_cursor)                     # 截斷提示行
+            for _tx_key, _tx, _idx in _keyed:
+                _edge_key = (_eu, _ev, _tx_key)
+                _fan_pt   = self._fan_offset_point(_eu, _ev, _idx, _total_slots)
+                _wpts     = self._edge_waypoints.get(_edge_key, [])
+                _verts    = [self._pos_network[_eu], _fan_pt, *_wpts,
+                             self._pos_network[_ev]]
 
-            # 置中：讓整個標籤塊上下對稱於邊中點
-            _center_shift = (_ys[0] + _ys[-1]) / 2.0
-            _ys = [y - _center_shift for y in _ys]
-            _yi = iter(_ys)
+                _arrow = mpatches.FancyArrowPatch(
+                    path=Path(_verts), arrowstyle="-|>", mutation_scale=13,
+                    color="#4a6fa5", linewidth=1.3,
+                    shrinkA=18, shrinkB=18, zorder=1,
+                )
+                self._ax.add_patch(_arrow)
 
-            for _tx in _show:
-                # 行 1：時間  數量 幣種
+                for _wi, (_wx, _wy) in enumerate(_wpts):
+                    self._ax.plot(_wx, _wy, marker="D", markersize=5,
+                                  color="#f5a623", markeredgecolor="#1a1a2e",
+                                  markeredgewidth=0.8, zorder=2)
+                    self._wp_hit_list.append((_edge_key, _wi, (_wx, _wy)))
+
+                # 標籤定位在該筆交易自己的分列點上（時間+金額在上、hash 在下）
+                _lx, _ly = _fan_pt
+                self._ax.plot(_lx, _ly, "o", markersize=3,
+                              color="#4a6fa5", zorder=2)
+
                 _ts    = (_tx.tx_time or "").strip()
                 _line1 = f"{_ts}  {_tx.amount_display}" if _ts else _tx.amount_display
-
-                _tr1 = mtransforms.offset_copy(
-                    self._ax.transData, fig=self._fig,
-                    x=0, y=next(_yi), units="points")
                 self._ax.text(
-                    _mx, _my, _line1,
-                    transform=_tr1, fontsize=6, color="#cccccc",
-                    ha="center", va="center",
+                    _lx, _ly, _line1,
+                    transform=mtransforms.offset_copy(
+                        self._ax.transData, fig=self._fig,
+                        x=0, y=4, units="points"),
+                    fontsize=6, color="#cccccc",
+                    ha="center", va="bottom",
                     fontfamily="Microsoft JhengHei",
                     bbox=dict(facecolor="#0d0d1a", edgecolor="#4a6fa5",
                               linewidth=0.4, alpha=0.88, pad=1.5,
                               boxstyle="round,pad=0.2"),
                     clip_on=True, zorder=3)
-
-                # 行 2：完整 tx hash
-                _tr2 = mtransforms.offset_copy(
-                    self._ax.transData, fig=self._fig,
-                    x=0, y=next(_yi), units="points")
                 self._ax.text(
-                    _mx, _my, _tx.tx_hash or "—",
-                    transform=_tr2, fontsize=5, color="#7a9cc0",
-                    ha="center", va="center",
+                    _lx, _ly, _tx.tx_hash or "—",
+                    transform=mtransforms.offset_copy(
+                        self._ax.transData, fig=self._fig,
+                        x=0, y=-4, units="points"),
+                    fontsize=5, color="#7a9cc0",
+                    ha="center", va="top",
                     fontfamily="Consolas",
                     bbox=dict(facecolor="#0d0d1a", edgecolor="none",
                               alpha=0.82, pad=1.0,
@@ -730,12 +696,11 @@ class FlowGraphPanel(ctk.CTkFrame):
                     clip_on=True, zorder=3)
 
             if _extra:
-                _trx = mtransforms.offset_copy(
-                    self._ax.transData, fig=self._fig,
-                    x=0, y=next(_yi), units="points")
+                _lx, _ly = self._fan_offset_point(
+                    _eu, _ev, len(_keyed), _total_slots)
                 self._ax.text(
-                    _mx, _my, f"…另 {_extra} 筆",
-                    transform=_trx, fontsize=5, color="#888888",
+                    _lx, _ly, f"…另 {_extra} 筆",
+                    fontsize=5, color="#888888",
                     ha="center", va="center",
                     fontfamily="Microsoft JhengHei",
                     bbox=dict(facecolor="#0d0d1a", edgecolor="none",
@@ -957,28 +922,57 @@ class FlowGraphPanel(ctk.CTkFrame):
         return best, best_d
 
     @staticmethod
-    def _polyline_midpoint(verts: list) -> tuple:
-        """回傳沿多段折線（依弧長）置中的座標點。"""
-        if len(verts) == 1:
-            return verts[0]
-        seg_lens = [
-            ((verts[i + 1][0] - verts[i][0]) ** 2
-             + (verts[i + 1][1] - verts[i][1]) ** 2) ** 0.5
-            for i in range(len(verts) - 1)
-        ]
-        total = sum(seg_lens)
-        if total == 0:
-            return verts[0]
-        target = total / 2.0
-        acc = 0.0
-        for i, seg_len in enumerate(seg_lens):
-            if acc + seg_len >= target or i == len(seg_lens) - 1:
-                t = 0.0 if seg_len == 0 else (target - acc) / seg_len
-                x0, y0 = verts[i]
-                x1, y1 = verts[i + 1]
-                return (x0 + (x1 - x0) * t, y0 + (y1 - y0) * t)
-            acc += seg_len
-        return verts[-1]
+    def _grouped_pair_transactions(txs: list):
+        """把同一對節點的交易依時間排序，並分配各自的折點鍵值(tx_key)。
+        回傳 (keyed, extra, total_slots)：
+        - keyed: [(tx_key, EdgeInfo, fan_index), ...]，依時間由上往下排列
+        - extra: 超過 _EDGE_MAX 時，未繪製、只合併顯示筆數的交易數
+        - total_slots: 分列時的總槽數（含合併提示那一槽），供 _fan_offset_point 使用
+        """
+        EDGE_MAX = 6
+        txs_sorted = sorted(txs, key=lambda e: e.tx_time or "")
+        extra = max(0, len(txs_sorted) - EDGE_MAX)
+        show  = txs_sorted[:EDGE_MAX - 1] if extra else txs_sorted
+        total_slots = len(show) + (1 if extra else 0)
+
+        seen_hash: dict[str, int] = {}
+        keyed = []
+        for idx, tx in enumerate(show):
+            if tx.tx_hash:
+                n = seen_hash.get(tx.tx_hash, 0)
+                seen_hash[tx.tx_hash] = n + 1
+                tx_key = tx.tx_hash if n == 0 else f"{tx.tx_hash}#{n}"
+            else:
+                tx_key = f"__noHash{idx}"
+            keyed.append((tx_key, tx, idx))
+        return keyed, extra, total_slots
+
+    def _fan_offset_point(self, u: str, v: str, idx: int, total: int) -> tuple:
+        """計算節點 u→v 之間第 idx/total 筆交易的「尖錐狀」分列中點：
+        兩端仍收攏於節點本身，中段依交易筆數自動分開角度。
+        間距以螢幕像素（而非資料座標）計算，確保縮放/邊長不同時分列間距一致。"""
+        ux, uy = self._pos_network[u]
+        vx, vy = self._pos_network[v]
+        mx, my = (ux + vx) / 2, (uy + vy) / 2
+        if total <= 1:
+            return (mx, my)
+
+        disp_u = self._ax.transData.transform((ux, uy))
+        disp_v = self._ax.transData.transform((vx, vy))
+        disp_m = self._ax.transData.transform((mx, my))
+        ddx, ddy = disp_v[0] - disp_u[0], disp_v[1] - disp_u[1]
+        dlen = (ddx * ddx + ddy * ddy) ** 0.5
+        if dlen < 1e-6:
+            return (mx, my)
+
+        perp_x, perp_y = -ddy / dlen, ddx / dlen
+        spacing_px = 34.0   # 每筆交易之間的像素間距，需容納時間+金額/hash 兩行標籤
+        level = idx - (total - 1) / 2.0
+        offset_px = level * spacing_px
+
+        disp_target = (disp_m[0] + perp_x * offset_px, disp_m[1] + perp_y * offset_px)
+        data_target = self._ax.transData.inverted().transform(disp_target)
+        return (float(data_target[0]), float(data_target[1]))
 
     def _find_nearest_waypoint(self, x, y):
         """回傳 (edge_key, wp_index, 距離平方)；無折點時回傳 (None, None, inf)。"""
@@ -993,44 +987,49 @@ class FlowGraphPanel(ctk.CTkFrame):
         return best_key, best_idx, best_d
 
     def _find_edge_insert_point(self, x, y):
-        """在所有邊的折線段中，找出離 (x,y) 最近的線段。
+        """在所有邊的折線段中，找出離 (x,y) 最近的線段（每筆交易各自的分列線分開比對）。
         回傳 (edge_key, 插入位置索引, 距離平方)；找不到時回傳 (None, None, inf)。"""
         if x is None or y is None or self._state is None:
             return None, None, float("inf")
         best_key, best_idx, best_d = None, None, float("inf")
-        seen = set()
+
+        pair_grp: dict[tuple, list] = {}
         for _ei in self._state.edges:
-            key = (_ei.source, _ei.target)
-            if key in seen:
-                continue
-            seen.add(key)
-            u, v = key
+            pair_grp.setdefault((_ei.source, _ei.target), []).append(_ei)
+
+        for (u, v), txs in pair_grp.items():
             if u not in self._pos_network or v not in self._pos_network:
                 continue
-            verts = [self._pos_network[u], *self._edge_waypoints.get(key, []),
-                     self._pos_network[v]]
-            for i in range(len(verts) - 1):
-                d = self._point_segment_dist_sq((x, y), verts[i], verts[i + 1])
-                if d < best_d:
-                    best_d = d
-                    best_key, best_idx = key, i
+            keyed, _extra, total_slots = self._grouped_pair_transactions(txs)
+            for tx_key, _tx, idx in keyed:
+                edge_key = (u, v, tx_key)
+                fan_pt   = self._fan_offset_point(u, v, idx, total_slots)
+                verts = [self._pos_network[u], fan_pt,
+                         *self._edge_waypoints.get(edge_key, []),
+                         self._pos_network[v]]
+                for i in range(len(verts) - 1):
+                    d = self._point_segment_dist_sq((x, y), verts[i], verts[i + 1])
+                    if d < best_d:
+                        best_d = d
+                        best_key, best_idx = edge_key, i
         return best_key, best_idx, best_d
 
     @staticmethod
     def _serialize_edge_waypoints(edge_waypoints: dict) -> dict:
-        """{(from,to): [(x,y),...]} → {"from→to": [[x,y],...]}（JSON 物件鍵須為字串）。"""
-        return {f"{u}→{v}": [list(map(float, p)) for p in pts]
-                for (u, v), pts in edge_waypoints.items()}
+        """{(from,to,tx_key): [(x,y),...]} → {"from→to→tx_key": [[x,y],...]}
+        （JSON 物件鍵須為字串；tx_key 為交易雜湊或 __noHashN，確保每筆交易的折點各自獨立）。"""
+        return {f"{u}→{v}→{tk}": [list(map(float, p)) for p in pts]
+                for (u, v, tk), pts in edge_waypoints.items()}
 
     @staticmethod
     def _deserialize_edge_waypoints(data: dict) -> dict:
-        """{"from→to": [[x,y],...]} → {(from,to): [(x,y),...]}。"""
+        """{"from→to→tx_key": [[x,y],...]} → {(from,to,tx_key): [(x,y),...]}。"""
         result = {}
         for k, v in (data or {}).items():
             parts = k.split("→")
-            if len(parts) != 2:
+            if len(parts) != 3:
                 continue
-            result[(parts[0], parts[1])] = [tuple(p) for p in v]
+            result[(parts[0], parts[1], parts[2])] = [tuple(p) for p in v]
         return result
 
     @staticmethod
